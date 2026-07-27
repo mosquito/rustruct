@@ -1,0 +1,12 @@
+[package]
+name = "rustruct-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "rustruct_core"
+
+[dependencies]
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"

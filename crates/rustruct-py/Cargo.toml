@@ -1,0 +1,12 @@
+[package]
+name = "rustruct-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "rustruct_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustruct-core = { path = "../rustruct" }
+pyo3 = { version = "0.26", features = ["extension-module"] }

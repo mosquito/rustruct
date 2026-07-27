@@ -1,0 +1,14 @@
+[project]
+name = "rustruct-benchmark"
+version = "0"
+description = "Throughput benchmarks: rustruct vs struct-like codecs."
+requires-python = ">=3.11"
+dependencies = [
+    "rustruct",
+    "construct>=2.10",
+    "dataclasses-struct>=1.5",
+    "rich>=15.0.0",
+]
+
+[tool.uv.sources]
+rustruct = { path = "..", editable = true }
