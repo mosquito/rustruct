@@ -41,6 +41,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/mosquito/rustruct"
+Documentation = "https://mosquito.github.io/rustruct/"
 Source = "https://github.com/mosquito/rustruct"
 Tracker = "https://github.com/mosquito/rustruct/issues"
 

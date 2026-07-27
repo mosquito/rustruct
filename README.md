@@ -60,7 +60,8 @@ if not r:  # Incomplete: not enough data yet
 
 ## Documentation
 
-The full documentation starts at [docs/index.md](docs/index.md) and is
+The full documentation is at
+[mosquito.github.io/rustruct](https://mosquito.github.io/rustruct/) and is
 organised by user need: a guided tutorial, task-oriented how-to guides,
 explanations of the schema and execution model, and concise API reference.
 
