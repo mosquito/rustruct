@@ -27,7 +27,7 @@ autodoc_typehints = "signature"
 autodoc_typehints_format = "short"
 
 html_theme = "furo"
-html_title = f"rustruct {release}"
+html_title = project
 html_theme_options = {
     "light_css_variables": {
         "color-brand-primary": "#087f5b",
