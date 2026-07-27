@@ -1,5 +1,10 @@
 # rustruct
 
+[![Tests](https://github.com/mosquito/rustruct/workflows/tests/badge.svg)](https://github.com/mosquito/rustruct/actions?query=workflow%3Atests)
+[![Latest Version](https://img.shields.io/pypi/v/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![License](https://img.shields.io/pypi/l/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+
 A Rust core for parsing and building binary wire formats from Python.
 
 A declarative schema built from Python primitives is compiled into a

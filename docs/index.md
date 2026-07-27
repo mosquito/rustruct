@@ -1,5 +1,12 @@
 # rustruct
 
+```{only} html
+[![Latest Version](https://img.shields.io/pypi/v/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![Tests](https://github.com/mosquito/rustruct/workflows/tests/badge.svg)](https://github.com/mosquito/rustruct/actions?query=workflow%3Atests)
+[![License](https://img.shields.io/pypi/l/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+```
+
 `rustruct` is a binary format compiler with a Rust execution core and a
 declarative Python frontend. Define a wire layout as a `Struct` subclass and
 work with ordinary Python values:

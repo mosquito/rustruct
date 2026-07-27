@@ -6,9 +6,43 @@ build-backend = "maturin"
 name = "rustruct"
 version = "0.1.0"
 description = "Rust core for parsing and building binary wire formats from Python"
-readme = "README.md"
+authors = [{ name = "Dmitry Orlov", email = "orlovdl@gmail.com" }]
+keywords = [
+    "binary",
+    "struct",
+    "codec",
+    "wire-format",
+    "parser",
+    "pyo3",
+    "rust",
+]
 requires-python = ">=3.11"
+readme = "README.md"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/mosquito/rustruct"
+Source = "https://github.com/mosquito/rustruct"
+Tracker = "https://github.com/mosquito/rustruct/issues"
 
 [dependency-groups]
 dev = ["markdown-pytest>=0.6.5", "msgpack>=1.0", "pytest>=8", "ty", "ruff"]
