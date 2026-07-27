@@ -6,9 +6,16 @@ Function signatures are listed in {doc}`fields`.
 ## Byte order
 
 A structure accepts `byteorder="big"`, `"little"`, or `"network"`.
-`"network"` aliases `"big"`. Byte order is inherited by ordinary nested
-structures; a nested class can declare its own. Native byte order is not
-supported.
+`"network"` aliases `"big"`. Native byte order is not supported.
+
+Byte order follows Python subclassing: `class Child(Base)` with no
+`byteorder=` of its own uses `Base`'s. A structure used as another
+structure's *field* is a different relationship -- composition, not
+subclassing -- and does not inherit that way: with no `byteorder=` of its
+own, a nested structure defaults to `"big"` regardless of what the
+structure it's nested in declares. Give a nested structure its own
+explicit `byteorder=` whenever it should match, or differ from, its
+container.
 
 ## Scalar annotations
 

@@ -8,6 +8,11 @@ on:
 
 env:
   FORCE_COLOR: 1
+  # markdown-pytest (and anything else reading these docs) opens files with
+  # the platform-default encoding; on Windows that's cp1252, which chokes on
+  # the emoji/en-dashes in docs/*.md. Force Python's UTF-8 mode so `open()`
+  # defaults to UTF-8 everywhere, matching Linux/macOS.
+  PYTHONUTF8: "1"
 
 jobs:
   ruff:

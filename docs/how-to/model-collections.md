@@ -74,6 +74,11 @@ class Segment(Struct):
     end: Point
 ```
 
+Nested classes retain their own byte order rather than inheriting the
+container's: with no `byteorder=` of its own, a nested structure always
+defaults to `"big"`, even inside a `"little"`-ordered container. Give it
+an explicit `byteorder=` when it should match its container.
+
 Nested classes retain their own byte order.
 
 ## Bound a nested structure by size

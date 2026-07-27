@@ -35,6 +35,24 @@ def test_nested_struct_own_byteorder_overrides_outer():
     assert Outer.unpack(wire) == outer
 
 
+def test_nested_struct_without_explicit_byteorder_defaults_to_big_not_outer():
+    # A nested struct is a composed field, not a Python subclass of the
+    # outer -- it does not inherit the outer's byteorder. With no
+    # byteorder of its own it defaults to "big" (Struct's own default),
+    # regardless of what the outer structure declares.
+    class PlainInner(Struct):
+        x: U16
+
+    class Outer(Struct, byteorder="little"):
+        outer_x: U16
+        inner: PlainInner
+
+    outer = Outer(outer_x=1, inner=PlainInner(x=1))
+    wire = outer.pack()
+    assert wire == b"\x01\x00\x00\x01"
+    assert Outer.unpack(wire) == outer
+
+
 def test_sized_struct_window_tlv():
     class Body(Struct):
         payload: bytes = slice(len="*")
