@@ -57,6 +57,7 @@ python-source = "src"
 module-name = "rustruct.core"
 manifest-path = "crates/rustruct-py/Cargo.toml"
 features = ["pyo3/abi3-py311"]
+include = ["COPYING"]
 
 [tool.ruff]
 line-length = 119
