@@ -77,6 +77,17 @@ def test_max_limit():
     assert ei.value.kind == "limit"
 
 
+def test_max_limit_on_pack():
+    # max= also bounds pack(), not just unpack(): a value that violates it
+    # is rejected up front instead of producing wire bytes that would fail
+    # to round-trip through this codec's own unpack().
+    codec = compile((u("n", "u32"), u("data", "bytes", len=("ref", "n"), max=8)))
+    with pytest.raises(PackError) as ei:
+        codec.pack({"data": b"x" * 16})
+    assert ei.value.kind == "limit"
+    assert codec.pack({"data": b"x" * 8})  # exactly at the limit is fine
+
+
 def test_derived_length_out_of_prim_range():
     codec = compile((u("n", "u8"), u("data", "bytes", len=("ref", "n"))))
     with pytest.raises(PackError) as ei:

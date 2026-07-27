@@ -363,26 +363,32 @@ fn pack_value<S: Source>(ctx: &mut PCtx<S>, op: &Op, v: &S::Val) -> PRes<()> {
             ctx.out.resize(base + width, 0);
             pack_fixed_item(ctx, base, &items[0], Some(v))
         }
-        Op::Bytes { len, .. } => {
+        Op::Bytes { len, max, .. } => {
             let b = ctx
                 .source
                 .as_bytes(v)
                 .ok_or_else(|| PackFail::new(Kind::Type))?;
+            if b.len() > *max {
+                return Err(PackFail::new(Kind::Limit));
+            }
             ctx.out.extend_from_slice(&b);
             ctx.finish_len(len, b.len())
         }
-        Op::Str { len, enc, .. } => {
+        Op::Str { len, max, enc, .. } => {
             let s = ctx
                 .source
                 .as_str(v)
                 .ok_or_else(|| PackFail::new(Kind::Type))?;
             let b = encode(&s, *enc).ok_or_else(|| PackFail::new(Kind::Encode))?;
+            if b.len() > *max {
+                return Err(PackFail::new(Kind::Limit));
+            }
             // Encode happens before writing the length; the length
             // comes from the actual encoded byte count.
             ctx.out.extend_from_slice(&b);
             ctx.finish_len(len, b.len())
         }
-        Op::CStr { enc, .. } => {
+        Op::CStr { max, enc, .. } => {
             let s = ctx
                 .source
                 .as_str(v)
@@ -390,6 +396,9 @@ fn pack_value<S: Source>(ctx: &mut PCtx<S>, op: &Op, v: &S::Val) -> PRes<()> {
             let b = encode(&s, *enc).ok_or_else(|| PackFail::new(Kind::Encode))?;
             if b.contains(&0) {
                 return Err(PackFail::new(Kind::NulInCstr));
+            }
+            if b.len() > *max {
+                return Err(PackFail::new(Kind::Limit));
             }
             ctx.out.extend_from_slice(&b);
             ctx.out.push(0);

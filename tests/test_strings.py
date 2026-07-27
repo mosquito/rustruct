@@ -58,6 +58,22 @@ def test_cstr():
     assert ei.value.kind == "nul_in_cstr"
 
 
+def test_cstr_max_limit_on_pack():
+    codec = compile((u("s", "cstr", max=4),))
+    with pytest.raises(PackError) as ei:
+        codec.pack({"s": "toolong"})
+    assert ei.value.kind == "limit"
+    assert codec.pack({"s": "abcd"}) == b"abcd\x00"  # exactly at the limit
+
+
+def test_str_max_limit_on_pack():
+    codec = compile((u("s", "str", len="*", max=4),))
+    with pytest.raises(PackError) as ei:
+        codec.pack({"s": "toolong"})
+    assert ei.value.kind == "limit"
+    assert codec.pack({"s": "abcd"}) == b"abcd"  # exactly at the limit
+
+
 def test_cstr_no_terminator_within_max():
     codec = compile((u("s", "cstr", max=8),))
     with pytest.raises(InvalidDataError) as ei:

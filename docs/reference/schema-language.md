@@ -326,7 +326,28 @@ digest field itself as zero. A tuple names sibling spans.
 
 ## Limits
 
-Field-level `max=` bounds dynamic bytes or text.
+Field-level `max=` bounds dynamic bytes or text on both sides: unpack
+rejects wire data whose length would exceed it, and pack rejects a
+Python value that already exceeds it, before writing anything --
+a value that violates `max=` never silently produces wire bytes this
+same schema could not unpack again:
+
+<!-- name: test_schema_language_max_limit -->
+```python
+from rustruct import PackError, Struct, U8, slice
+
+
+class Blob(Struct):
+    length: U8
+    data: bytes = slice(len="length", max=4)
+
+
+try:
+    Blob(data=b"toolong").pack()
+except PackError as exc:
+    assert exc.kind == "limit"
+```
+
 {py:func}`rustruct.compile`(max_default=...) sets the fallback dynamic
 allocation limit, and {py:func}`rustruct.compile`(max_count=...) bounds
 array element counts. Both compile options have finite defaults.

@@ -286,6 +286,14 @@ fn cstr_roundtrip_and_errors() {
         &map(vec![("s", Value::Str("a\0b".into())), ("x", Value::Int(0))]),
     );
     assert_eq!(kind, Kind::NulInCstr);
+
+    // longer than max at pack time -- also checked before writing, not just
+    // on unpack of an already-produced buffer
+    let (kind, _) = pack_err(
+        &prog,
+        &map(vec![("s", Value::Str("a".repeat(9))), ("x", Value::Int(0))]),
+    );
+    assert_eq!(kind, Kind::Limit);
 }
 
 #[test]
@@ -345,6 +353,30 @@ fn bytes_max_limit() {
     .unwrap();
     let (kind, _) = unpack_err(&prog, &[0, 0, 1, 0, 1, 2, 3]);
     assert_eq!(kind, Kind::Limit);
+}
+
+#[test]
+fn bytes_max_limit_on_pack() {
+    // max= also bounds pack(), not just unpack(): a value that violates it
+    // is rejected up front instead of producing wire bytes this same codec
+    // could never unpack again.
+    let prog = compile(
+        &[
+            f("n", int(IntPrim::U32)),
+            f(
+                "data",
+                TypeIn::Bytes {
+                    len: r("n"),
+                    max: Some(4),
+                },
+            ),
+        ],
+        &Options::default(),
+    )
+    .unwrap();
+    let (kind, _) = pack_err(&prog, &map(vec![("data", Value::Bytes(vec![0; 8]))]));
+    assert_eq!(kind, Kind::Limit);
+    let _ = pack_ok(&prog, &map(vec![("data", Value::Bytes(vec![0; 4]))]));
 }
 
 #[test]
