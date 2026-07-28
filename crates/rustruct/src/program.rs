@@ -112,7 +112,7 @@ crate::closed_set!(
     /// `"UTF-8"`, `"utf8"` and `"utf_8"` all land on the same member --
     /// which is why the aliases below are written the way a person would.
     Encodings, Enc, "encoding", "utf-8/ascii/latin-1",
-    normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '_'], ""),
+    normalize,
     [
         Enc::Utf8 => "utf-8",
         Enc::Ascii => "ascii" | "us-ascii",

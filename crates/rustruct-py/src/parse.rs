@@ -293,27 +293,29 @@ fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<
 }
 
 /// `int | "*" | ("ref", name) | (op, a, b)`.
-fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
+fn expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, depth: usize) -> PyResult<ExprIn> {
+    // `kind`/`key` rather than a formatted label: this runs once per node
+    // of every expression in the schema, and the label is only ever needed
+    // to build a message, so it is put together in the error paths.
     let expected = || {
         schema_err(format!(
-            "{what}: expected an int, '*', or a tuple starting with an operator"
+            "{kind}: {key}: expected an int, '*', or a tuple starting with an operator"
         ))
     };
     if depth > MAX_EXPR_DEPTH {
         return Err(schema_err(format!(
-            "{what} nests deeper than {MAX_EXPR_DEPTH} levels"
+            "{kind}: {key} nests deeper than {MAX_EXPR_DEPTH} levels"
         )));
     }
     // bool is an int subclass, so an unguarded `len=True` sails through as
     // len=1 and packs a one-byte field with no complaint anywhere.
     if v.cast::<PyBool>().is_ok() {
         return Err(schema_err(format!(
-            "{what}: a bool is not a length; use an int, '*', or a reference"
+            "{kind}: {key}: a bool is not a length; use an int, '*', or a reference"
         )));
     }
     if let Ok(s) = v.cast::<PyString>() {
-        let s: String = s.extract()?;
-        return if s == "*" {
+        return if s.to_str()? == "*" {
             Ok(ExprIn::Greedy)
         } else {
             Err(expected())
@@ -323,13 +325,16 @@ fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
         return v
             .extract()
             .map(ExprIn::Imm)
-            .map_err(|_| schema_err(format!("{what} literal does not fit in i64")));
+            .map_err(|_| schema_err(format!("{kind}: {key} literal does not fit in i64")));
     }
     let t = v.cast::<PyTuple>().map_err(|_| expected())?;
-    let head: String = match t.get_item(0) {
-        Ok(h) => h.extract().map_err(|_| expected())?,
-        Err(_) => return Err(expected()),
-    };
+    let head_obj = t.get_item(0).map_err(|_| expected())?;
+    // Borrowed, not extracted: a `String` per operator is an allocation
+    // per node, and the name is only read.
+    let head = head_obj
+        .cast::<PyString>()
+        .map_err(|_| expected())?
+        .to_str()?;
     if head == "ref" {
         if t.len() != 2 {
             return Err(schema_err(
@@ -348,14 +353,14 @@ fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
         )));
     }
     Ok(ExprIn::Bin(
-        Op::parse(&head).map_err(schema_err)?,
-        Box::new(expr(&t.get_item(1)?, what, depth + 1)?),
-        Box::new(expr(&t.get_item(2)?, what, depth + 1)?),
+        Op::parse(head).map_err(schema_err)?,
+        Box::new(expr(&t.get_item(1)?, kind, key, depth + 1)?),
+        Box::new(expr(&t.get_item(2)?, kind, key, depth + 1)?),
     ))
 }
 
 fn p_expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ExprIn> {
-    expr(v, &format!("{kind}: {key}"), 0)
+    expr(v, kind, key, 0)
 }
 
 fn p_over(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, _ctx: &Ctx) -> PyResult<OverIn> {

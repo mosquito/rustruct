@@ -26,41 +26,80 @@
 #[macro_export]
 macro_rules! closed_set {
     ($(#[$m:meta])* $name:ident, $ty:ty, $what:literal, $accepted:literal,
-     normalize = $norm:expr,
+     normalize,
      [$($val:expr => $canon:literal $(| $alias:literal)*),+ $(,)?]) => {
-        $crate::closed_set!(@build $(#[$m])* $name, $ty, $what, $accepted,
-            |a: &str, b: &str| { let f = $norm; f(a) == f(b) },
-            [$($val => $canon $(| $alias)*),+]);
+        $crate::closed_set!(@decl $(#[$m])* $name, $ty, $what, $accepted,
+            [$($canon $(, $alias)*),+], [$($canon),+]);
+
+        impl $name {
+            pub fn parse(s: &str) -> Result<$ty, String> {
+                // A scan rather than a `match`, because the comparison is
+                // not string equality. `loose_eq` allocates nothing, so
+                // this stays cheaper than normalizing into a String and
+                // matching on that.
+                $(if $crate::loose_eq(s, $canon) $(|| $crate::loose_eq(s, $alias))* {
+                    return Ok($val);
+                })+
+                Err(Self::unknown(s))
+            }
+        }
     };
     ($(#[$m:meta])* $name:ident, $ty:ty, $what:literal, $accepted:literal,
      [$($val:expr => $canon:literal $(| $alias:literal)*),+ $(,)?]) => {
-        $crate::closed_set!(@build $(#[$m])* $name, $ty, $what, $accepted,
-            |a: &str, b: &str| a == b,
-            [$($val => $canon $(| $alias)*),+]);
+        $crate::closed_set!(@decl $(#[$m])* $name, $ty, $what, $accepted,
+            [$($canon $(, $alias)*),+], [$($canon),+]);
+
+        impl $name {
+            pub fn parse(s: &str) -> Result<$ty, String> {
+                match s {
+                    $($canon $(| $alias)* => Ok($val),)+
+                    _ => Err(Self::unknown(s)),
+                }
+            }
+        }
     };
-    (@build $(#[$m:meta])* $name:ident, $ty:ty, $what:literal, $accepted:literal,
-     $eq:expr, [$($val:expr => $canon:literal $(| $alias:literal)*),+ $(,)?]) => {
+    (@decl $(#[$m:meta])* $name:ident, $ty:ty, $what:literal, $accepted:literal,
+     [$($every:literal),+], [$($pub_name:literal),+]) => {
         $(#[$m])*
         pub struct $name;
 
         impl $name {
             /// The names this set publishes -- one per value.
-            pub const ALL: &'static [&'static str] = &[$($canon),+];
+            pub const ALL: &'static [&'static str] = &[$($pub_name),+];
 
             /// Every spelling `parse` accepts, published or not.
-            pub const ACCEPTED: &'static [&'static str] = &[$($canon $(, $alias)*),+];
+            pub const ACCEPTED: &'static [&'static str] = &[$($every),+];
 
-            /// The value a name stands for, or a message naming what was
-            /// expected.
-            pub fn parse(s: &str) -> Result<$ty, String> {
-                let eq = $eq;
-                $(if eq(s, $canon) $(|| eq(s, $alias))* {
-                    return Ok($val);
-                })+
-                Err(format!("{} {:?} is not supported ({})", $what, s, $accepted))
+            fn unknown(s: &str) -> String {
+                format!("{} {:?} is not supported ({})", $what, s, $accepted)
             }
         }
     };
+}
+
+/// Equal ignoring ASCII case and any `-`/`_`.
+///
+/// What `closed_set!(normalize)` compares with. Written as a walk rather
+/// than `to_ascii_lowercase().replace(...)` on both sides because that
+/// allocated two `String`s per candidate, and the sets it runs over are
+/// small enough that the scan is the cheap part.
+#[doc(hidden)]
+pub fn loose_eq(a: &str, b: &str) -> bool {
+    let mut x = a
+        .bytes()
+        .filter(|c| *c != b'-' && *c != b'_')
+        .map(|c| c.to_ascii_lowercase());
+    let mut y = b
+        .bytes()
+        .filter(|c| *c != b'-' && *c != b'_')
+        .map(|c| c.to_ascii_lowercase());
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return true,
+            (p, q) if p == q => continue,
+            _ => return false,
+        }
+    }
 }
 
 pub mod compile;
