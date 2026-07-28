@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
 };
+use pyo3::Borrowed;
 
 use rustruct_core::compile::{compile as core_compile, Options};
 use rustruct_core::model::{Builder, Source};
@@ -509,6 +510,182 @@ fn collect_op_keys(py: Python<'_>, op: &Op, cache: &mut KeyCache) {
     }
 }
 
+// ---------- Python-level types for the generated stub ----------
+//
+// `Codec`'s arguments and results are `Bound<PyAny>`/`Py<PyAny>`, which is
+// all Rust knows, so the stub would render every one of them as `Any` and
+// poison inference for anything downstream. These newtypes carry nothing at
+// runtime; they exist so `INPUT_TYPE`/`OUTPUT_TYPE` can state the Python
+// type. The `#[pyo3(signature = (x: "..."))]` string form cannot do this:
+// pyo3 stores it as a string constant (see `PyTypeAnnotation::as_type_hint`),
+// so it lands in the stub quoted and with no import for the names it uses.
+//
+// Buffer arguments say `typing_extensions.Buffer`, not pyo3's own
+// `collections.abc.Buffer` (see its `FromPyObject for PyBuffer`): the
+// latter is 3.12+ and this package supports 3.11, where `ty` rejects it.
+// The backport is a stub-only reference -- stubs are never executed and
+// type checkers carry its definition -- so it adds no runtime dependency.
+#[cfg(feature = "experimental-inspect")]
+mod hint {
+    use pyo3::inspect::PyStaticExpr as E;
+
+    pub const ANY: E = E::Attribute {
+        value: &E::Name { id: "typing" },
+        attr: "Any",
+    };
+    pub const STR: E = E::Name { id: "str" };
+    pub const BUFFER: E = E::Attribute {
+        value: &E::Name {
+            id: "typing_extensions",
+        },
+        attr: "Buffer",
+    };
+    pub const INT: E = E::Name { id: "int" };
+    pub const BYTES: E = E::Name { id: "bytes" };
+    pub const DICT_STR_ANY: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple { elts: &[STR, ANY] },
+    };
+    pub const MAPPING_STR_ANY: E = E::Subscript {
+        value: &E::Attribute {
+            value: &E::Name {
+                id: "collections.abc",
+            },
+            attr: "Mapping",
+        },
+        slice: &E::Tuple { elts: &[STR, ANY] },
+    };
+    pub const DICT_AND_POS: E = E::Subscript {
+        value: &E::Name { id: "tuple" },
+        slice: &E::Tuple {
+            elts: &[DICT_STR_ANY, INT],
+        },
+    };
+    /// An iterable of `(name, kind, opts)` field tuples.
+    pub const FIELDS: E = E::Subscript {
+        value: &E::Attribute {
+            value: &E::Name {
+                id: "collections.abc",
+            },
+            attr: "Iterable",
+        },
+        slice: &E::Subscript {
+            value: &E::Name { id: "tuple" },
+            slice: &E::Tuple {
+                elts: &[
+                    E::BinOp {
+                        left: &STR,
+                        op: pyo3::inspect::PyStaticOperator::BitOr,
+                        right: &E::Constant {
+                            value: pyo3::inspect::PyStaticConstant::None,
+                        },
+                    },
+                    STR,
+                    DICT_STR_ANY,
+                ],
+            },
+        },
+    };
+    pub const DICT_STR_LIST_STR: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple {
+            elts: &[
+                STR,
+                E::Subscript {
+                    value: &E::Name { id: "list" },
+                    slice: &STR,
+                },
+            ],
+        },
+    };
+}
+
+/// A returned object whose Python type the stub should spell out.
+macro_rules! returns {
+    ($(#[$m:meta])* $name:ident => $hint:expr) => {
+        $(#[$m])*
+        pub(crate) struct $name(pub(crate) Py<PyAny>);
+
+        impl<'py> IntoPyObject<'py> for $name {
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: pyo3::inspect::PyStaticExpr = $hint;
+            type Target = PyAny;
+            type Output = Bound<'py, PyAny>;
+            type Error = std::convert::Infallible;
+            fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+                Ok(self.0.into_bound(py))
+            }
+        }
+    };
+}
+
+returns!(
+    /// A decoded structure: `dict[str, Any]`.
+    Decoded => hint::DICT_STR_ANY
+);
+returns!(
+    /// Encoded wire bytes.
+    Encoded => hint::BYTES
+);
+returns!(
+    /// `(decoded, new position)`.
+    DecodedAt => hint::DICT_AND_POS
+);
+returns!(
+    /// `(decoded, new position)` or `Incomplete`.
+    Parsed => pyo3::inspect::PyStaticExpr::BinOp {
+        left: &hint::DICT_AND_POS,
+        op: pyo3::inspect::PyStaticOperator::BitOr,
+        right: &<Incomplete as pyo3::PyTypeInfo>::TYPE_HINT,
+    }
+);
+returns!(
+    /// The closed-set tables: `dict[str, list[str]]`.
+    Vocabulary => hint::DICT_STR_LIST_STR
+);
+
+/// Anything supporting the buffer protocol.
+pub(crate) struct BufferArg<'py>(pub(crate) Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for BufferArg<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::BUFFER;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(BufferArg(ob.to_owned()))
+    }
+}
+
+/// The schema, as `compile` takes it.
+pub(crate) struct Fields<'py>(pub(crate) Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for Fields<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::FIELDS;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(Fields(ob.to_owned()))
+    }
+}
+
+/// A mapping of field values, as `pack` takes it.
+pub struct Values<'py>(Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for Values<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::MAPPING_STR_ANY;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(Values(ob.to_owned()))
+    }
+}
+
 #[pyclass(module = "rustruct.core", frozen)]
 pub struct Codec {
     prog: Arc<Program>,
@@ -519,14 +696,15 @@ pub struct Codec {
 impl Codec {
     /// Requires the buffer to be fully consumed; a tail raises
     /// InvalidDataError with kind="trailing".
-    fn unpack(&self, py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn unpack(&self, py: Python<'_>, buf: BufferArg<'_>) -> PyResult<Decoded> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
                 key_cache: &self.key_cache,
             };
             match core_unpack(&self.prog, &mut builder, data, 0, true, false) {
-                Outcome::Ok { value, .. } => Ok(value),
+                Outcome::Ok { value, .. } => Ok(Decoded(value)),
                 Outcome::Incomplete { .. } => unreachable!("stream=false"),
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -540,16 +718,21 @@ impl Codec {
     fn unpack_from(
         &self,
         py: Python<'_>,
-        buf: &Bound<'_, PyAny>,
+        buf: BufferArg<'_>,
         offset: usize,
-    ) -> PyResult<(Py<PyAny>, usize)> {
+    ) -> PyResult<DecodedAt> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
                 key_cache: &self.key_cache,
             };
             match core_unpack(&self.prog, &mut builder, data, offset, false, false) {
-                Outcome::Ok { value, pos } => Ok((value, pos)),
+                Outcome::Ok { value, pos } => Ok(DecodedAt(
+                    PyTuple::new(py, [value, pos.into_pyobject(py)?.into_any().unbind()])?
+                        .into_any()
+                        .unbind(),
+                )),
                 Outcome::Incomplete { .. } => unreachable!("stream=false"),
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -560,7 +743,8 @@ impl Codec {
 
     /// Streaming parse: a data shortage yields Incomplete, not an exception.
     #[pyo3(signature = (buf, offset = 0))]
-    fn parse(&self, py: Python<'_>, buf: &Bound<'_, PyAny>, offset: usize) -> PyResult<Py<PyAny>> {
+    fn parse(&self, py: Python<'_>, buf: BufferArg<'_>, offset: usize) -> PyResult<Parsed> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
@@ -569,10 +753,10 @@ impl Codec {
             match core_unpack(&self.prog, &mut builder, data, offset, false, true) {
                 Outcome::Ok { value, pos } => {
                     let t = PyTuple::new(py, [value, pos.into_pyobject(py)?.into_any().unbind()])?;
-                    Ok(t.into_any().unbind())
+                    Ok(Parsed(t.into_any().unbind()))
                 }
                 Outcome::Incomplete { needed } => {
-                    Ok(Py::new(py, Incomplete { needed })?.into_any())
+                    Ok(Parsed(Py::new(py, Incomplete { needed })?.into_any()))
                 }
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -581,7 +765,8 @@ impl Codec {
         })
     }
 
-    fn pack(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn pack(&self, py: Python<'_>, values: Values<'_>) -> PyResult<Encoded> {
+        let values = &values.0;
         let source = PySource {
             key_cache: &self.key_cache,
             _marker: std::marker::PhantomData,
@@ -590,7 +775,7 @@ impl Codec {
             return Err(PyTypeError::new_err("pack: expected a Mapping"));
         }
         match core_pack(&self.prog, &source, values) {
-            PackOutcome::Ok(bytes) => Ok(PyBytes::new(py, &bytes).into_any().unbind()),
+            PackOutcome::Ok(bytes) => Ok(Encoded(PyBytes::new(py, &bytes).into_any().unbind())),
             PackOutcome::Err { kind, path } => Err(pack_err(py, kind.as_str(), &path)),
         }
     }
@@ -599,10 +784,12 @@ impl Codec {
     fn pack_into(
         &self,
         py: Python<'_>,
-        buf: &Bound<'_, PyAny>,
+        buf: BufferArg<'_>,
         offset: usize,
-        values: &Bound<'_, PyAny>,
+        values: Values<'_>,
     ) -> PyResult<usize> {
+        let buf = &buf.0;
+        let values = &values.0;
         let source = PySource {
             key_cache: &self.key_cache,
             _marker: std::marker::PhantomData,
@@ -654,14 +841,14 @@ impl Codec {
         format!("{:#?}", self.prog)
     }
 
-    fn to_bytes(&self) -> PyResult<Py<PyAny>> {
+    fn to_bytes(&self) -> PyResult<Encoded> {
         Err(PyNotImplementedError::new_err(
             "Program serialization is not implemented yet",
         ))
     }
 
     #[staticmethod]
-    fn from_bytes(_data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn from_bytes(_data: &[u8]) -> PyResult<Codec> {
         Err(PyNotImplementedError::new_err(
             "Program serialization is not implemented yet",
         ))
@@ -677,12 +864,12 @@ impl Codec {
 #[pyo3(signature = (fields, *, byteorder = "big", max_default = 67_108_864, max_count = 16_777_216))]
 fn compile(
     py: Python<'_>,
-    fields: &Bound<'_, PyAny>,
+    fields: Fields<'_>,
     byteorder: &str,
     max_default: usize,
     max_count: usize,
 ) -> PyResult<Codec> {
-    let parsed = parse::parse_fields(fields, &parse::Ctx::root())?;
+    let parsed = parse::parse_fields(&fields.0, &parse::Ctx::root())?;
     let opts = Options {
         byteorder: parse::Bo::parse(byteorder)?,
         max_default,

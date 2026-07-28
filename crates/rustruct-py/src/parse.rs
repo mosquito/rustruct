@@ -720,7 +720,7 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
 /// can prove that every name Python knows is accepted, but a name that
 /// exists only in Rust stays invisible to Python and simply goes unused.
 #[pyfunction]
-pub fn vocabulary(py: Python<'_>) -> PyResult<Py<PyAny>> {
+pub fn vocabulary(py: Python<'_>) -> PyResult<crate::Vocabulary> {
     use rustruct_core::error::Kind as ErrKind;
 
     let d = PyDict::new(py);
@@ -737,5 +737,5 @@ pub fn vocabulary(py: Python<'_>) -> PyResult<Py<PyAny>> {
         }
     }
     d.set_item("options", options)?;
-    Ok(d.into_any().unbind())
+    Ok(crate::Vocabulary(d.into_any().unbind()))
 }

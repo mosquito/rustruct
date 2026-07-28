@@ -10,7 +10,9 @@ time, and it cannot know what a function body adds.
 """
 
 from _typeshed import Incomplete as Incomplete2
+from collections.abc import Iterable, Mapping
 from typing import Any, Final, final
+from typing_extensions import Buffer
 
 __abi__: Final[int]
 """
@@ -30,18 +32,18 @@ class Codec:
         rather than by address.
         """
     @staticmethod
-    def from_bytes(_data: Any) -> Any: ...
+    def from_bytes(_data: bytes) -> Codec: ...
     @property
     def min_size(self, /) -> int:
         """
         Lower bound of the size.
         """
-    def pack(self, /, values: Any) -> Any: ...
-    def pack_into(self, /, buf: Any, offset: int, values: Any) -> int:
+    def pack(self, /, values: Mapping[str, Any]) -> bytes: ...
+    def pack_into(self, /, buf: Buffer, offset: int, values: Mapping[str, Any]) -> int:
         """
         Writes into an existing writable buffer, returns the new position.
         """
-    def parse(self, /, buf: Any, offset: int = 0) -> Any:
+    def parse(self, /, buf: Buffer, offset: int = 0) -> tuple[dict[str, Any], int] |Incomplete:
         """
         Streaming parse: a data shortage yields Incomplete, not an exception.
         """
@@ -50,13 +52,13 @@ class Codec:
         """
         Exact size, if the schema is static.
         """
-    def to_bytes(self, /) -> Any: ...
-    def unpack(self, /, buf: Any) -> Any:
+    def to_bytes(self, /) -> bytes: ...
+    def unpack(self, /, buf: Buffer) -> dict[str, Any]:
         """
         Requires the buffer to be fully consumed; a tail raises
         InvalidDataError with kind="trailing".
         """
-    def unpack_from(self, /, buf: Any, offset: int = 0) -> tuple[Any, int]:
+    def unpack_from(self, /, buf: Buffer, offset: int = 0) -> tuple[dict[str, Any], int]:
         """
         A trailing tail is allowed; returns (dict, new position).
         """
@@ -74,7 +76,7 @@ class Incomplete:
         Minimum bytes missing beyond the end of the buffer (a lower bound).
         """
 
-def compile(fields: Any, *, byteorder: str = "big", max_default: int = 67108864, max_count: int = 16777216) -> Codec:
+def compile(fields: Iterable[tuple[str |None, str, dict[str, Any]]], *, byteorder: str = "big", max_default: int = 67108864, max_count: int = 16777216) -> Codec:
     """
     Compile a schema in the documented `(name, kind, opts)` form.
     
@@ -83,7 +85,7 @@ def compile(fields: Any, *, byteorder: str = "big", max_default: int = 67108864,
     code that reads them come out of one declaration.
     """
 
-def vocabulary() -> Any:
+def vocabulary() -> dict[str, list[str]]:
     """
     Every closed set the Rust side owns, keyed by what it names.
     
