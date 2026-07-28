@@ -117,6 +117,10 @@ Unpack can report `TRUNCATED`, `TRAILING`, `RANGE`, `NEGATIVE_LEN`,
 `MISSING`, `LENGTH`, `INDIVISIBLE`, `INCONSISTENT`, `BUFFER`,
 `UNKNOWN_FLAG`, `TYPE` and `ENCODE`.
 
+`DEPTH` is the one a schema from {py:func}`rustruct.compile` cannot produce:
+unpacking allows 64 nested structures, and a schema needing more is refused
+at compile time rather than left to fail on every input.
+
 ## Expression operators
 
 {py:class}`rustruct.BinOp` names the heads an expression tuple can carry:

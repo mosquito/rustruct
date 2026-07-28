@@ -185,7 +185,7 @@ def test_deep_schema_is_rejected_not_a_crash():
     # parse_type/parse_type_spec/parse_fields are mutually recursive over
     # caller-supplied data, so an unbounded schema used to overflow the C
     # stack and kill the interpreter outright (SIGSEGV, nothing to catch).
-    compile(nest_structs(64))  # comfortably inside the limit
+    compile(nest_structs(63))  # comfortably inside the limit
     with pytest.raises(SchemaError, match="nests deeper"):
         compile(nest_structs(4000))
 
@@ -220,10 +220,11 @@ def test_depth_caps_are_exactly_where_they_claim():
     #
     # Two caps, counted separately: one for how deep types nest, one for
     # how deep a single expression nests (reset per option, so a schema
-    # full of 128-deep lengths is fine).
-    compile(nest_structs(128))
+    # full of 128-deep lengths is fine). Nesting arrays rather than
+    # structs, because struct nesting hits the frame check long before.
+    compile(nest_arrays(128))
     with pytest.raises(SchemaError, match="deeper than 128"):
-        compile(nest_structs(129))
+        compile(nest_arrays(129))
 
     compile((u("b", "bytes", len=nest_expr(128)),))
     with pytest.raises(SchemaError, match="deeper than 128"):
@@ -244,28 +245,19 @@ def test_absurdly_deep_schema_is_rejected_cheaply():
         compile((u("b", "bytes", len=nest_expr(1_000_000)),))
 
 
-def test_deep_schema_limit_is_above_anything_usable():
-    # Two different limits, and neither number here is the parser's 128:
-    # both schemas below compile fine. Unpacking caps live frames at 64
-    # (MAX_DEPTH, program.rs), and a struct is what costs one -- including
-    # the schema itself, which is the top frame. So 63 levels of nesting
-    # is the last that decodes and 64 is one too many, which is why these
-    # numbers look off by one against the cap they are testing.
+def test_struct_nesting_too_deep_to_decode_is_refused_at_compile():
+    # Unpacking allows 64 live frames and a struct costs one -- including
+    # the schema itself, which is the outermost frame. So 63 levels of
+    # nesting is the last that decodes, and the 64th is one too many,
+    # which is why these numbers look off by one against the cap.
     #
-    # That is the gap this pins, in the right direction: a too-deep schema
-    # has to get as far as compiling and fail on data. Drop the parser's
-    # limit below 64 and the failure would arrive earlier, at compile
-    # time, as a SchemaError instead.
-    #
-    # This bounds the parser's limit from below only. It says nothing
-    # about other nesting: arrays cost no frame and decode far deeper,
-    # see test_deep_array_nesting_decodes_past_the_struct_frame_limit.
+    # Such a schema used to compile, and even pack, and fail only on the
+    # first unpack -- so you could build bytes nothing could read back.
+    # Depth is visible in the compiled program, so compile() says it now.
     codec = compile(nest_structs(63))
     assert codec.unpack(b"\x01")
-    codec = compile(nest_structs(64))
-    with pytest.raises(InvalidDataError) as excinfo:
-        codec.unpack(b"\x01")
-    assert excinfo.value.kind == "depth"
+    with pytest.raises(SchemaError, match="structs deep"):
+        compile(nest_structs(64))
 
 
 def test_exception_hierarchy():

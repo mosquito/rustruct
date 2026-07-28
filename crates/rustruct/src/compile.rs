@@ -5,7 +5,7 @@ use crate::error::{SRes, SchemaError};
 use crate::expr::{Expr, Ins, EXPR_STACK};
 use crate::program::{
     BitItem, Common, CountSrc, Enc, FixKind, FixedItem, FlagItem, Inv, Key, LenSrc, Op, Over,
-    Program, Reg, RestPolicy, MAX_REGS, MAX_SPANS,
+    Program, Reg, RestPolicy, MAX_DEPTH, MAX_REGS, MAX_SPANS,
 };
 use crate::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
 
@@ -31,7 +31,40 @@ pub fn compile(fields: &[FieldIn], opts: &Options) -> SRes<Program> {
         opts,
         scopes: Vec::new(),
     };
-    c.compile_scope(fields, opts.byteorder)
+    let prog = c.compile_scope(fields, opts.byteorder)?;
+    let frames = frame_depth(&prog);
+    if frames > MAX_DEPTH {
+        return Err(err(format!(
+            "schema nests {frames} structs deep, more than the {MAX_DEPTH} \
+             unpacking allows (the schema itself is the outermost one)"
+        )));
+    }
+    Ok(prog)
+}
+
+/// How many frames unpacking this program needs at its deepest.
+///
+/// `run_struct` pushes one frame per `Op::Nest` and one for the program it
+/// is handed, and refuses to go past `MAX_DEPTH`. Knowing that here means a
+/// schema too deep to ever decode is refused at compile time, rather than
+/// compiling, packing happily, and failing every single unpack.
+fn frame_depth(prog: &Program) -> usize {
+    fn in_op(op: &Op) -> usize {
+        match op {
+            // The only op that costs a frame, windowed or not.
+            Op::Nest { prog, .. } => frame_depth(prog),
+            // Pass-through: these decode their child in the same frame.
+            Op::Array { elem, .. } | Op::Cond { then: elem, .. } => in_op(elem),
+            Op::Switch { cases, default, .. } => cases
+                .iter()
+                .map(|(_, op)| in_op(op))
+                .chain(default.iter().map(|op| in_op(op)))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+    1 + prog.ops.iter().map(in_op).max().unwrap_or(0)
 }
 
 fn err(msg: impl Into<String>) -> SchemaError {
