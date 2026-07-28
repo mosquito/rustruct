@@ -722,12 +722,14 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
 #[pyfunction]
 pub fn vocabulary(py: Python<'_>) -> PyResult<crate::Vocabulary> {
     use rustruct_core::error::Kind as ErrKind;
+    use rustruct_core::program::Enc;
 
     let d = PyDict::new(py);
     d.set_item("byteorders", Bo::ALL)?;
     d.set_item("int_prims", Prim::ALL)?;
     d.set_item("binops", Op::ALL)?;
     d.set_item("error_kinds", ErrKind::ALL)?;
+    d.set_item("encodings", Enc::ALL)?;
 
     let options = PyDict::new(py);
     for (kinds, opts) in OPTIONS {

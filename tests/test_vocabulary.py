@@ -243,6 +243,14 @@ def test_error_kinds_match_rust():
     assert {e.value for e in ErrorKind} == rust_vocabulary()["error_kinds"]
 
 
+def test_encodings_match_rust():
+    # The spelling tests above pin the aliases in both directions, one
+    # spelling at a time. This is the other half: a fourth encoding added
+    # to the core would otherwise stay invisible here, exactly the way
+    # crc32c and crc64_xz did before they were named.
+    assert {e.value for e in Encoding} == rust_vocabulary()["encodings"]
+
+
 def test_errors_policy_is_still_the_single_one():
     # Asserted through a real compile() rather than against a published
     # table: a table listing the accepted policies would be a second copy of

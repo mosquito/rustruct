@@ -959,6 +959,37 @@ fn named_only(name: Option<Arc<str>>, what: &str) -> SRes<Arc<str>> {
     })
 }
 
+/// The encodings, as one table: the canonical spelling `Enc::ALL`
+/// publishes and the normalized forms `parse_enc` matches come out of the
+/// same declaration, so one cannot gain a spelling the other has never
+/// heard of.
+///
+/// The bracketed names are matched *after* normalization -- lowercased with
+/// `-` and `_` removed -- which is why they are written without separators
+/// and why the canonical name is listed separately rather than reused.
+macro_rules! encodings {
+    ($($variant:path => $canon:literal [$($norm:literal),+ $(,)?]),+ $(,)?) => {
+        impl Enc {
+            /// The canonical spelling of each encoding: what `vocabulary()`
+            /// publishes, and what `rustruct.Encoding`'s members are.
+            pub const ALL: &'static [&'static str] = &[$($canon),+];
+        }
+
+        fn enc_from_normalized(norm: &str) -> Option<Enc> {
+            match norm {
+                $($($norm)|+ => Some($variant),)+
+                _ => None,
+            }
+        }
+    };
+}
+
+encodings! {
+    Enc::Utf8 => "utf-8" ["utf8"],
+    Enc::Ascii => "ascii" ["ascii", "usascii"],
+    Enc::Latin1 => "latin-1" ["latin1", "iso88591"],
+}
+
 fn parse_enc(encoding: &str, errors: &str) -> SRes<Enc> {
     if errors != "strict" {
         return Err(err(format!(
@@ -966,15 +997,11 @@ fn parse_enc(encoding: &str, errors: &str) -> SRes<Enc> {
         )));
     }
     let norm = encoding.to_ascii_lowercase().replace(['-', '_'], "");
-    Ok(match norm.as_str() {
-        "utf8" => Enc::Utf8,
-        "ascii" | "usascii" => Enc::Ascii,
-        "latin1" | "iso88591" => Enc::Latin1,
-        _ => {
-            return Err(err(format!(
-                "encoding {encoding:?} is not supported by the v1 core (utf-8/ascii/latin-1)"
-            )))
-        }
+    enc_from_normalized(&norm).ok_or_else(|| {
+        err(format!(
+            "encoding {encoding:?} is not supported by the v1 core ({})",
+            Enc::ALL.join("/")
+        ))
     })
 }
 
