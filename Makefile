@@ -16,17 +16,14 @@ all: test
 build-rust:
 	$(CARGO) build --workspace
 
-## Build/install the Python extension, and regenerate its type stub from the
-## type information pyo3 embeds in the built library. A real file-based
-## dependency: only rebuilds when Rust sources actually changed (or $(EXT) is
-## missing, e.g. right after `make clean`), instead of paying for it on every
-## `make test`/`make pytest`. `uv sync` is for the dev tooling; maturin is
-## what produces $(EXT), and `--generate-stubs` is a CLI flag with no
-## [tool.maturin] equivalent, so it cannot ride along on the sync.
+## Build/install the Python extension via maturin (uv build backend). A real
+## file-based dependency: only reinstalls when Rust sources actually changed
+## (or $(EXT) is missing, e.g. right after `make clean`), instead of paying a
+## full reinstall on every `make test`/`make pytest`. --reinstall-package is
+## required here: plain `uv sync` doesn't notice a stale/missing local .so.
 $(EXT): $(RUST_SRC) pyproject.toml
-	$(UV) sync
-	$(UV) run maturin develop --quiet --generate-stubs
-	@test -f $(EXT) || (echo "error: $(EXT) was not produced by maturin" >&2; exit 1)
+	$(UV) sync --reinstall-package rustruct
+	@test -f $(EXT) || (echo "error: $(EXT) was not produced by uv sync" >&2; exit 1)
 
 build-python: $(EXT)
 

@@ -60,6 +60,21 @@ manifest-path = "crates/rustruct-py/Cargo.toml"
 features = ["pyo3/abi3-py311", "rustruct-py/experimental-inspect"]
 include = ["COPYING"]
 
+[tool.uv]
+# Passed to maturin's PEP 517 backend, so a bare `uv sync` also writes the
+# type stub. There is no [tool.maturin] key for it -- only this.
+config-settings = { "maturin.build-args" = "--generate-stubs" }
+
+# uv only rebuilds a local package when one of these changes, and the default
+# list is just pyproject.toml -- so editing Rust left a stale extension
+# installed with nothing to say so.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "crates/**/*.rs" },
+    { file = "crates/**/Cargo.toml" },
+]
+
 [tool.ruff]
 line-length = 119
 src = ["src", "tests"]
