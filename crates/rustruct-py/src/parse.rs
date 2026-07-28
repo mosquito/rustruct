@@ -241,54 +241,56 @@ fn opt_get<'py>(opts: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<'
     }
 }
 
-/// Edit distance for the near-miss hint below -- `difflib`'s job on the
-/// Python side, in twenty lines and with no dependency.
+/// Distance in edits, counting a swapped pair of adjacent letters as one.
 ///
-/// Optimal string alignment, not plain Levenshtein: a swapped pair of
-/// adjacent letters costs one edit, not two. That is the single commonest
-/// typo (`lne`, `alog`, `siez`), and counting it as two puts it outside the
-/// 0.6 cutoff, which is exactly where a hint is most wanted.
-fn edits(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in d.iter_mut().enumerate() {
-        row[0] = i;
-        for (j, cell) in row.iter_mut().enumerate() {
-            if i == 0 {
-                *cell = j;
-            }
-        }
-    }
+/// Optimal string alignment rather than plain Levenshtein, because that
+/// swap is the commonest typo (`siez`, `conut`, `byteodrer`) and charging
+/// it two edits puts it out of reach of the cutoff below -- which is
+/// exactly where a suggestion is most wanted.
+fn distance(a: &[char], b: &[char]) -> usize {
+    // Three rows, not the whole matrix: a substitution looks back one row
+    // and a transposition two, and nothing looks back further.
+    let mut before = vec![0usize; b.len() + 1];
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+
     for i in 1..=a.len() {
+        current[0] = i;
         for j in 1..=b.len() {
-            let mut best = (d[i - 1][j] + 1)
-                .min(d[i][j - 1] + 1)
-                .min(d[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]));
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(d[i - 2][j - 2] + 1);
+            let substitute = previous[j - 1] + usize::from(a[i - 1] != b[j - 1]);
+            let delete = previous[j] + 1;
+            let insert = current[j - 1] + 1;
+            let mut best = substitute.min(delete).min(insert);
+            let swapped = i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1];
+            if swapped {
+                best = best.min(before[j - 2] + 1);
             }
-            d[i][j] = best;
+            current[j] = best;
         }
+        // Rotate: today's row becomes yesterday's, and the row from two
+        // steps back is recycled as the next scratch row.
+        std::mem::swap(&mut before, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
     }
-    d[a.len()][b.len()]
+    previous[b.len()]
 }
 
-/// The closest accepted option to a misspelling, if anything is close
-/// enough. Declaration order breaks ties, so the message is deterministic.
-///
-/// Scored and cut off the way `difflib.get_close_matches` does -- twice the
-/// characters the two share over their combined length, accepted at 0.6 --
-/// so a one-letter option like `on` still gets a hint from `n`, which a
-/// distance-over-longest ratio would score at 0.5 and drop.
+/// The closest allowed name, if one is close enough to be worth saying --
+/// `difflib.get_close_matches`'s job on the Python side, at its own 0.6
+/// cutoff, scoring how much of the two names is shared.
 fn nearest<'a>(word: &str, allowed: &[&'a str]) -> Option<&'a str> {
+    const CUTOFF: f64 = 0.6;
+    let word: Vec<char> = word.chars().collect();
     let mut best: Option<&'a str> = None;
-    let mut best_score = 0.0f64;
-    let n = word.chars().count();
+    let mut best_score = 0.0;
     for &candidate in allowed {
-        let m = candidate.chars().count();
-        let shared = n.max(m).saturating_sub(edits(word, candidate));
-        let score = 2.0 * shared as f64 / (n + m).max(1) as f64;
-        if score >= 0.6 && score > best_score {
+        let other: Vec<char> = candidate.chars().collect();
+        let shared = word
+            .len()
+            .max(other.len())
+            .saturating_sub(distance(&word, &other));
+        let score = 2.0 * shared as f64 / (word.len() + other.len()).max(1) as f64;
+        if score >= CUTOFF && score > best_score {
             best_score = score;
             best = Some(candidate);
         }

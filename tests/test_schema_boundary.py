@@ -25,6 +25,47 @@ def test_an_unknown_option_is_rejected():
         compile((u("x", "u8", typo=1),))
 
 
+@pytest.mark.parametrize(
+    ("field", "meant"),
+    [
+        (u("x", "u8", cnst=1), "const"),
+        (u("x", "str", len=1, encodng="utf-8"), "encoding"),
+        (u("b", "bits", width=8, signd=True), "signed"),
+        # Transposed letters, which is what the boundary's edit distance
+        # counts as one edit rather than two -- plain Levenshtein scores
+        # these below the cutoff and the hint disappears.
+        (u("x", "struct", fields=(), siez=1), "size"),
+        (u("a", "array", elem=("u8", {}), conut=1), "count"),
+        (u("x", "u8", byteodrer="big"), "byteorder"),
+        (u("d", "digest", alog="crc32", over="*"), "algo"),
+    ],
+)
+def test_a_near_miss_option_says_what_was_meant(field, meant):
+    with pytest.raises(SchemaError, match=f"did you mean '{meant}'"):
+        compile((field,))
+
+
+def test_a_hint_survives_nesting_alongside_the_path():
+    # Two separate mechanisms meet here: the boundary suggests the name,
+    # and the field's location is appended on the way out. Each is covered
+    # on its own, so this pins that they compose rather than one of them
+    # swallowing the other.
+    elem = ("struct", {"fields": (u("x", "u8", cnst=1),)})
+    with pytest.raises(SchemaError) as excinfo:
+        compile((u("rows", "array", elem=elem, count=1),))
+    assert "did you mean 'const'" in str(excinfo.value)
+    assert str(excinfo.value).endswith("(at rows[].x)")
+
+
+def test_a_typo_close_to_nothing_gets_no_hint():
+    # The cutoff earns its keep here: a wrong guess is worse than silence,
+    # and `bytes` has no option within reach of either of these.
+    for typo in ("zzz", "encoding"):
+        with pytest.raises(SchemaError) as excinfo:
+            compile((u("x", "bytes", len=1, **{typo: 1}),))
+        assert "did you mean" not in str(excinfo.value), typo
+
+
 def test_an_unknown_option_set_to_none_is_still_rejected():
     # None means "not given", so an option can be passed unset. That read
     # is about the value, not the name: a misspelling used to slip through
