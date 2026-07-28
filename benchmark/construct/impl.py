@@ -6,9 +6,13 @@ import construct as C
 SUPPORTS = {"scalars", "vector", "telemetry"}
 
 
+def build_scalars(n):
+    return C.Struct(*[f"f{i}" / C.Int16ub for i in range(n)])
+
+
 def make_scalars(n):
     names = [f"f{i}" for i in range(n)]
-    struct_def = C.Struct(*[name / C.Int16ub for name in names])
+    struct_def = build_scalars(n)
     values = dict(zip(names, common.scalars_values(n), strict=True))
 
     def pack():
@@ -21,9 +25,13 @@ def make_scalars(n):
     return pack, unpack
 
 
-def make_vector(m):
+def build_vector(_m):
     item = C.Struct("a" / C.Int16ub, "b" / C.Int16ub)
-    vec = C.Struct("count" / C.Int16ub, "records" / C.Array(C.this.count, item))
+    return C.Struct("count" / C.Int16ub, "records" / C.Array(C.this.count, item))
+
+
+def make_vector(m):
+    vec = build_vector(m)
     values = {"count": m, "records": [{"a": a, "b": b} for a, b in common.vector_items(m)]}
 
     def pack():
@@ -36,7 +44,7 @@ def make_vector(m):
     return pack, unpack
 
 
-def make_telemetry(m):
+def build_telemetry(_m):
     record = C.Struct(
         "record_id" / C.Int32ub,
         "kind" / C.Int8ub,
@@ -59,6 +67,11 @@ def make_telemetry(m):
         "records" / C.PrefixedArray(C.Int16ub, record),
     )
     envelope = C.Prefixed(C.Int32ub, frame)
+    return envelope
+
+
+def make_telemetry(m):
+    envelope = build_telemetry(m)
     values = common.telemetry_values(m)
 
     def pack():

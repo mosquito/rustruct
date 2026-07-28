@@ -4,15 +4,33 @@ dynamically per size."""
 import common
 
 from rustruct import I32, U8, U16, U32, U64, Struct, array, raw, sized, slice, string
+from rustruct.struct import get_codec
+
+
+def compiled(struct_cls):
+    """Return `struct_cls` with its codec already built.
+
+    The frontend compiles lazily and caches per class, so timing the class
+    statement alone would leave rustruct's compile out of the comparison
+    entirely and report a cost nobody actually pays.
+    """
+    get_codec(struct_cls)
+    return struct_cls
+
 
 SUPPORTS = {"scalars", "vector", "telemetry"}
 
 
-def make_scalars(n):
+def build_scalars(n):
     names = [f"f{i}" for i in range(n)]
     namespace = {"__annotations__": {name: U16 for name in names}}
     namespace.update(dict.fromkeys(names, 0))  # defaults
-    struct_cls = type(f"Scalars{n}", (Struct,), namespace, byteorder="network")
+    return compiled(type(f"Scalars{n}", (Struct,), namespace, byteorder="network"))
+
+
+def make_scalars(n):
+    names = [f"f{i}" for i in range(n)]
+    struct_cls = build_scalars(n)
     obj = struct_cls(**dict(zip(names, common.scalars_values(n), strict=True)))
 
     def pack():
@@ -25,7 +43,7 @@ def make_scalars(n):
     return pack, unpack
 
 
-def make_vector(m):
+def build_vector(_m):
     class Item(Struct, byteorder="network"):
         a: U16
         b: U16
@@ -34,6 +52,11 @@ def make_vector(m):
         n: U16  # derived: refreshed from len(items) on pack
         items: list = array(elem=Item, count="n")
 
+    return compiled(Vec), Item
+
+
+def make_vector(m):
+    Vec, Item = build_vector(m)
     obj = Vec(items=[Item(a=a, b=b) for a, b in common.vector_items(m)])
 
     def pack():
@@ -46,7 +69,7 @@ def make_vector(m):
     return pack, unpack
 
 
-def make_telemetry(m):
+def build_telemetry(_m):
     class Record(Struct, byteorder="network"):
         record_id: U32
         kind: U8
@@ -75,6 +98,11 @@ def make_telemetry(m):
         frame_size: U32
         frame: Frame = sized(Frame, size="frame_size")
 
+    return compiled(Envelope), Frame, Record
+
+
+def make_telemetry(m):
+    Envelope, Frame, Record = build_telemetry(m)
     values = common.telemetry_values(m)
     records = [Record(**record) for record in values["records"]]
     frame_values = dict(values)

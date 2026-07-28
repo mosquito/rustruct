@@ -29,6 +29,17 @@ uv run python run.py --budget 0.001 --rounds 1 --min-iterations 1
   payload.  This exercises nested structs, size windows, derived lengths,
   arrays, text decoding, and bytes materialization together.
 
+Each workload is measured three ways: **build** (construct the schema --
+`struct.Struct(fmt)`, a `construct` object graph, a `ctypes`/dataclass class,
+`rustruct.compile()`), then **pack** and **unpack**. Building is paid once per
+schema rather than once per message, so it never shows up in the pack/unpack
+numbers -- which is exactly why a change landing entirely on the compile path
+can look free there. The `rustruct` frontend compiles lazily and caches per
+class, so its build case forces the codec rather than timing an empty class
+statement. Build is swept over the size only for `scalars`, whose schema grows
+a field per unit; a `vector` or `telemetry` schema is the same object at every
+`m`, so it is reported as one number rather than a fit through a flat line.
+
 Every pack starts from the implementation's normal named mapping or typed
 object. Every unpack materializes the implementation's normal named result
 before summing every field, so neither lazy decoders nor a specialized
@@ -43,6 +54,14 @@ application needs mappings and nested records. Construct and rustruct perform
 the corresponding lookup and materialization inside their public APIs. An
 application designed around positional tuples can omit this adapter, but then
 it is measuring a different, less ergonomic API contract.
+
+`scalars` is the smallest workload here, and its numbers are correspondingly
+sensitive to where the compiler happened to place code: two builds of *identical*
+source, differing only in the order two declarations appear in a file, have been
+measured 5% apart on `scalars: pack`. Treat a difference of that size on that row
+as unattributable unless something in the packing path actually changed; the
+`vector` and `telemetry` rows do far more work per call and do not wobble like
+that.
 
 Iteration counts auto-scale to a fixed time budget. For each library we
 least-squares fit `ns = base + slope * size`: `slope` (ns/field, ns/item) is

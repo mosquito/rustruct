@@ -7,7 +7,7 @@ Workloads:
 * **telemetry(m)** -- a length-framed, mixed-width message with a dynamic
   string and m nested records, each with a dynamic bytes payload.
 
-For each library and size we time pack and unpack, then least-squares fit
+For each library and size we time building the schema, then pack and unpack, then least-squares fit
 ``ns = base + slope * size`` so the per-field / per-item cost (``slope``) and the
 fixed per-call overhead (``base``) are visible -- that is the runtime complexity.
 
@@ -123,6 +123,68 @@ def run_task(mods, task, sizes, wire_of, checksum_of, unit, measure_fn):
             packs[label][size] = measure_fn(pack)
             unpacks[label][size] = measure_fn(lambda u=unpack, w=wire: u(w))
     return packs, unpacks
+
+
+def run_build(mods, task, sizes, unit, measure_fn):
+    """Time building the schema itself: `struct.Struct(fmt)`, a `construct`
+    object graph, a `ctypes`/dataclass class, `rustruct.compile()`.
+
+    Paid once per schema rather than per message, so it never shows up in
+    the pack/unpack tables -- which is exactly why a change that lands
+    entirely on the compile path can look free there.
+
+    Swept over the size only where the schema itself grows with it, which
+    is `scalars` and its `n` fields; see `run_build_once` for the rest.
+    """
+    LOG.rule(f"[bold]{task} build[/]  ({unit} = {sizes[0]}..{sizes[-1]})")
+    out = {}
+    for label, _ in IMPLEMENTATIONS:
+        mod = mods[label]
+        build = getattr(mod, f"build_{task}", None)
+        if task not in mod.SUPPORTS or build is None:
+            LOG.log(f"[dim]{label}: skips {task} build[/]")
+            continue
+        out[label] = {}
+        for size in sizes:
+            LOG.log(f"{task} build  [cyan]{label}[/]  {unit}={size}")
+            out[label][size] = measure_fn(lambda b=build, sz=size: b(sz))
+    return out
+
+
+def run_build_once(mods, task, size, measure_fn):
+    """The same, for a schema that does not vary with the size.
+
+    An array of `m` items is one schema whatever `m` is, so there is nothing
+    to fit -- a single number per implementation is the whole answer, and a
+    fitted slope over a flat line would be noise reported as a result.
+    """
+    LOG.rule(f"[bold]{task} build[/]")
+    out = {}
+    for label, _ in IMPLEMENTATIONS:
+        mod = mods[label]
+        build = getattr(mod, f"build_{task}", None)
+        if task not in mod.SUPPORTS or build is None:
+            LOG.log(f"[dim]{label}: skips {task} build[/]")
+            continue
+        LOG.log(f"{task} build  [cyan]{label}[/]")
+        out[label] = measure_fn(lambda b=build, sz=size: b(sz))
+    return out
+
+
+def render_build_once(title, data):
+    """One column, because the schema is the same at every size."""
+    table = Table(title=title, title_justify="left", title_style="bold")
+    table.add_column("impl")
+    table.add_column("ns", justify="right", style="bold")
+    table.add_column("vs struct", justify="right")
+
+    baseline = data.get("struct")
+    for label, ns in sorted(data.items(), key=lambda kv: kv[1]):
+        ratio = f"{ns / baseline:,.2f}x" if baseline else "-"
+        style = "bold cyan" if label == "rustruct" else ("dim" if label == "struct" else "")
+        table.add_row(label, f"{ns:,.0f}", ratio, style=style)
+    OUT.print(table)
+    OUT.print()
 
 
 def make_io_reader(wire):
@@ -380,13 +442,22 @@ def main(argv=None):
         f"[bold]ns/unit[/] = fitted cost per field/item"
     )
 
+    sb = run_build(mods, "scalars", SCALAR_SIZES, "n", measure_fn)
+    render("scalars: build  (n u16 fields)", SCALAR_SIZES, sb, "n")
+
     sp, su = run_task(mods, "scalars", SCALAR_SIZES, common.scalars_wire, common.scalars_checksum, "n", measure_fn)
     render("scalars: pack   (n u16 fields)", SCALAR_SIZES, sp, "n")
     render("scalars: unpack (n u16 fields)", SCALAR_SIZES, su, "n")
 
+    vb = run_build_once(mods, "vector", VECTOR_SIZES[-1], measure_fn)
+    render_build_once("vector: build  (one schema, any m)", vb)
+
     vp, vu = run_task(mods, "vector", VECTOR_SIZES, common.vector_wire, common.vector_checksum, "m", measure_fn)
     render("vector: pack   (m items)", VECTOR_SIZES, vp, "m")
     render("vector: unpack (m items)", VECTOR_SIZES, vu, "m")
+
+    tb = run_build_once(mods, "telemetry", TELEMETRY_SIZES[-1], measure_fn)
+    render_build_once("telemetry: build  (one schema, any m)", tb)
 
     tp, tu = run_task(
         mods,

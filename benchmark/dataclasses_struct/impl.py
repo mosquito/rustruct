@@ -6,10 +6,14 @@ import dataclasses_struct as dcs
 SUPPORTS = {"scalars"}
 
 
+def build_scalars(n):
+    plain = type(f"Scalars{n}", (), {"__annotations__": {f"f{i}": dcs.U16 for i in range(n)}})
+    return dcs.dataclass_struct(size="std", byteorder="big")(plain)
+
+
 def make_scalars(n):
     names = [f"f{i}" for i in range(n)]
-    plain = type(f"Scalars{n}", (), {"__annotations__": {name: dcs.U16 for name in names}})
-    struct_cls = dcs.dataclass_struct(size="std", byteorder="big")(plain)
+    struct_cls = build_scalars(n)
     obj = struct_cls(*common.scalars_values(n))
 
     def pack():

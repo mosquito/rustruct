@@ -7,13 +7,17 @@ import common
 SUPPORTS = {"scalars"}
 
 
-def make_scalars(n):
-    names = [f"f{i}" for i in range(n)]
-    struct_cls = type(
+def build_scalars(n):
+    return type(
         f"Scalars{n}",
         (ctypes.BigEndianStructure,),
-        {"_pack_": 1, "_fields_": [(name, ctypes.c_uint16) for name in names]},
+        {"_pack_": 1, "_fields_": [(f"f{i}", ctypes.c_uint16) for i in range(n)]},
     )
+
+
+def make_scalars(n):
+    names = [f"f{i}" for i in range(n)]
+    struct_cls = build_scalars(n)
     obj = struct_cls(*common.scalars_values(n))
 
     def pack():
