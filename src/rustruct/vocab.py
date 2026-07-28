@@ -45,6 +45,7 @@ __all__ = [
     "Kind",
     "KindArg",
     "KindStr",
+    "REST_KEY",
     "RestPolicy",
 ]
 
@@ -84,10 +85,15 @@ class Kind(enum.StrEnum):
 class ByteOrder(enum.StrEnum):
     """Wire byte order.
 
-    ``NETWORK`` is an alias for ``BIG``, kept as its own member because it
-    documents intent the way the ``struct`` module's ``!`` does. There is
-    deliberately no ``NATIVE``: the core refuses it, since it would make the
-    wire format depend on the machine doing the encoding.
+    ``NETWORK`` compiles to exactly what ``BIG`` does -- same program, same
+    bytes -- and exists as its own spelling because it documents intent the
+    way the ``struct`` module's ``!`` does. It is not an alias in the
+    ``enum`` sense: it is a distinct member with the value ``"network"``,
+    so ``ByteOrder.NETWORK == ByteOrder.BIG`` is false. Compare what a
+    codec produces, not the member you passed.
+
+    There is deliberately no ``NATIVE``: the core refuses it, since it
+    would make the wire format depend on the machine doing the encoding.
     """
 
     BIG = "big"
@@ -184,7 +190,11 @@ class ErrorKind(enum.StrEnum):
     LIMIT = "limit"
     """A length or count exceeded its ``max``."""
     DEPTH = "depth"
-    """Nesting exceeded the 64-frame limit."""
+    """Nesting exceeded the 64-frame limit.
+
+    Not reachable from :func:`rustruct.compile`, which refuses a schema
+    that deep rather than letting it fail on every input.
+    """
     CHECKSUM = "checksum"
     CONST = "const"
     RESERVED_BITS = "reserved_bits"

@@ -257,10 +257,10 @@ fn nearest<'a>(word: &str, allowed: &[&'a str]) -> Option<&'a str> {
 }
 
 fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResult<()> {
-    for (key, value) in opts.iter() {
-        if value.is_none() {
-            continue;
-        }
+    // Every key is checked, including one explicitly set to None: `opt_get`
+    // reads that as "not given", and a misspelling would otherwise sail
+    // through as long as it happened to carry None.
+    for key in opts.keys() {
         let k: String = key
             .extract()
             .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?;
@@ -707,7 +707,7 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
     let mut out = Vec::new();
     for item in obj
         .try_iter()
-        .map_err(|_| schema_err("fields must be a tuple of fields"))?
+        .map_err(|_| schema_err("fields must be an iterable of (name, kind, opts) tuples"))?
     {
         out.push(parse_field(&item?, ctx)?);
     }

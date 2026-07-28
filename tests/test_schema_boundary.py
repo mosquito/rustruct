@@ -25,6 +25,16 @@ def test_an_unknown_option_is_rejected():
         compile((u("x", "u8", typo=1),))
 
 
+def test_an_unknown_option_set_to_none_is_still_rejected():
+    # None means "not given", so an option can be passed unset. That read
+    # is about the value, not the name: a misspelling used to slip through
+    # whenever it happened to carry None, quietly disabling the very guard
+    # the caller was relying on.
+    compile((u("x", "u8", const=None),))
+    with pytest.raises(SchemaError, match="unknown option .cnst."):
+        compile((u("x", "u8", cnst=None),))
+
+
 def test_a_missing_required_option_says_which():
     with pytest.raises(SchemaError, match="len is required"):
         compile((u("d", "bytes"),))

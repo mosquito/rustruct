@@ -583,14 +583,27 @@ mod hint {
             },
         },
     };
-    pub const DICT_STR_LIST_STR: E = E::Subscript {
+    const LIST_STR: E = E::Subscript {
+        value: &E::Name { id: "list" },
+        slice: &STR,
+    };
+    const DICT_STR_LIST_STR: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple {
+            elts: &[STR, LIST_STR],
+        },
+    };
+    /// Most entries are a flat list of names, but `options` is keyed by
+    /// kind, so the value type is a union rather than just `list[str]`.
+    pub const VOCABULARY: E = E::Subscript {
         value: &E::Name { id: "dict" },
         slice: &E::Tuple {
             elts: &[
                 STR,
-                E::Subscript {
-                    value: &E::Name { id: "list" },
-                    slice: &STR,
+                E::BinOp {
+                    left: &LIST_STR,
+                    op: pyo3::inspect::PyStaticOperator::BitOr,
+                    right: &DICT_STR_LIST_STR,
                 },
             ],
         },
@@ -637,8 +650,8 @@ returns!(
     }
 );
 returns!(
-    /// The closed-set tables: `dict[str, list[str]]`.
-    Vocabulary => hint::DICT_STR_LIST_STR
+    /// The closed-set tables, `options` keyed by kind and the rest flat.
+    Vocabulary => hint::VOCABULARY
 );
 
 /// Anything supporting the buffer protocol.

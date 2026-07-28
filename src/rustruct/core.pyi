@@ -84,7 +84,7 @@ def compile(fields: Iterable[tuple[str |None, str, dict[str, Any]]], *, byteorde
     code that reads them come out of one declaration.
     """
 
-def vocabulary() -> dict[str, list[str]]:
+def vocabulary() -> dict[str, list[str] |dict[str, list[str]]]:
     """
     Every closed set the Rust side owns, keyed by what it names.
     

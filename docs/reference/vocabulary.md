@@ -66,8 +66,10 @@ away from its preset.
 ## Byte order
 
 {py:class}`rustruct.ByteOrder` has `BIG`, `LITTLE` and `NETWORK`. `NETWORK`
-is an alias for `BIG` that documents intent the way the standard library's
-`struct` format character `!` does.
+compiles to exactly what `BIG` does, and documents intent the way the
+standard library's `struct` format character `!` does. It is a member in its
+own right rather than an `enum` alias, so it carries the value `"network"`
+and does not compare equal to `BIG`.
 
 There is deliberately no `NATIVE`: the core refuses it, because it would
 make the wire format depend on whichever machine happened to do the
