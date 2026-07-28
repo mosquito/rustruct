@@ -46,7 +46,7 @@ Source = "https://github.com/mosquito/rustruct"
 Tracker = "https://github.com/mosquito/rustruct/issues"
 
 [dependency-groups]
-dev = ["markdown-pytest>=0.6.5", "msgpack>=1.0", "pytest>=8", "ty", "ruff"]
+dev = ["markdown-pytest>=0.6.5", "maturin>=1.7,<2.0", "msgpack>=1.0", "pytest>=8", "ty", "ruff"]
 docs = [
     "furo",
     "myst-parser",
@@ -57,12 +57,13 @@ docs = [
 python-source = "src"
 module-name = "rustruct.core"
 manifest-path = "crates/rustruct-py/Cargo.toml"
-features = ["pyo3/abi3-py311"]
+features = ["pyo3/abi3-py311", "rustruct-py/experimental-inspect"]
 include = ["COPYING"]
 
 [tool.ruff]
 line-length = 119
 src = ["src", "tests"]
+extend-exclude = ["src/rustruct/core.pyi"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
