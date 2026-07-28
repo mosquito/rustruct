@@ -108,3 +108,23 @@ def test_array_then_present_and_absent():
     absent = WithArrayThen(has_items=0, count=0)
     assert absent.pack() == b"\x00\x00"  # has_items=0, count=0 -- no crash
     assert WithArrayThen.unpack(absent.pack()).items is None
+
+
+class TwoKindsOfDefault(Struct, byteorder="big"):
+    """A plain default and a conditional one in the same class.
+
+    `__init__` and `from_mapping` each bind their defaults into the globals
+    of the compiled methods. Those are generated separately and compiled
+    together, so the names have to be unique across all of them -- when
+    they were not, this class's `pad` came back as 999.
+    """
+
+    has_extra: U8 = 1
+    pad: U8 = 42
+    extra: object = when(pred="has_extra", then=U16, default=999)
+
+
+def test_a_plain_default_survives_a_conditional_one():
+    assert TwoKindsOfDefault(has_extra=1).pad == 42
+    assert TwoKindsOfDefault.from_mapping({"has_extra": 0, "pad": 5}).extra == 999
+    assert TwoKindsOfDefault.from_mapping({"has_extra": 0, "pad": 5}).pad == 5

@@ -342,8 +342,14 @@ def ast_call(func, args):
 def ast_bind(namespace, prefix, value):
     """Put `value` into the compiled function's globals under a fresh name
     and return a Name node loading it -- how generated code references
-    runtime objects (shapes, defaults, other classes' compiled methods)."""
+    runtime objects (shapes, defaults, other classes' compiled methods).
+
+    Fresh because the counter is the namespace's own size, so every class
+    must build all of its methods against one dict. Handing each method its
+    own and merging afterwards silently aliased a field's default onto
+    another's, since the counters restarted."""
     name = f"{prefix}{len(namespace)}"
+    assert name not in namespace, f"generated name {name!r} bound twice"
     namespace[name] = value
     return ast_load(name)
 
@@ -409,45 +415,40 @@ LOAD = ast.Load()
 STORE = ast.Store()
 
 
-def ast_function(name, args, body, namespace):
-    """One FunctionDef built as an AST (never via source-string templating),
-    paired with the globals it will need."""
+def ast_function(name, args, body):
+    """One FunctionDef built as an AST (never via source-string templating)."""
     fn = ast.FunctionDef(name=name, args=args, body=body, decorator_list=[], **POSITION)
     # type_params: a FunctionDef field from PEP 695 (3.12+), required by
     # compile() on 3.12+ and simply unused before that. setattr(), since
     # typeshed's FunctionDef stub only declares this field for a 3.12+
     # target and this project's floor is 3.11.
     setattr(fn, "type_params", [])  # noqa: B010
-    return fn, namespace
+    return fn
 
 
-def compile_functions(cls, generated):
+def compile_functions(cls, defs, namespace):
     """Compile a class's generated methods together, and return them.
 
     One `compile()` call rather than one per method: the call has a fixed
     cost that dwarfs bodies this small, and every class needs three. They
-    end up sharing one globals dict, which is fine -- each contributes
-    names the others do not use.
+    share one globals dict, which is also the one `ast_bind` counted
+    against while building them -- see there for why that matters.
     """
-    defs, namespace = [], {}
-    for fn, ns in generated:
-        defs.append(fn)
-        namespace |= ns
     module = ast.Module(body=defs, type_ignores=[])
     exec(compile(module, f"<rustruct:{cls.__name__}>", "exec"), namespace)
     return [namespace[fn.name] for fn in defs]
 
 
-def compile_init(fields, no_input_names):
+def compile_init(fields, no_input_names, namespace):
     """Generate a real __init__ with a genuine keyword-only signature, so
     CPython's own call-binding machinery (fast, C-level) handles required-
     vs-optional and rejects unknown keywords, instead of a Python-level loop
     popping from **kwargs and branching on default/default_factory/
     no_input_names per field per call."""
     if not fields:
-        return ast_function("__init__", ast_signature(["self"]), [ast.Pass(**POSITION)], {})
+        return ast_function("__init__", ast_signature(["self"]), [ast.Pass(**POSITION)])
 
-    namespace = {"_MISSING": MISSING}
+    namespace["_MISSING"] = MISSING
     kwonly, kw_defaults, body = [], [], []
     for f in fields:
         kwonly.append(f.name)
@@ -481,7 +482,7 @@ def compile_init(fields, no_input_names):
             )
         )
     args = ast_signature(["self"], kwonlyargs=kwonly, kw_defaults=kw_defaults)
-    return ast_function("__init__", args, body, namespace)
+    return ast_function("__init__", args, body)
 
 
 def emit_to_python(shape, expr, namespace, depth=0):
@@ -552,15 +553,15 @@ def emit_to_wire(shape, expr, namespace, depth=0):
             return ast_call(ast.Attribute(value=sh, attr="to_wire", ctx=LOAD, **POSITION), [expr(), ast_load("ctx")])
 
 
-def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
-    namespace = {"_Struct": Struct}
+def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names, namespace):
+    namespace["_Struct"] = Struct
     args = ast_signature(["self", "ctx"], defaults=[ast.Tuple(elts=[], ctx=LOAD, **POSITION)])
     if not no_input_names and not cond_names and all(shapes[f.name] is SCALAR_SHAPE for f in fields):
         # All-scalar, nothing omitted: one C-level dict copy of the
         # instance dict beats a per-key literal (the core ignores any
         # stray extra keys on pack, verified).
         body = [ast.Return(value=ast_call(ast_load("dict"), [ast_self_dict(ast.Load())]), **POSITION)]
-        return ast_function("to_mapping", args, body, namespace)
+        return ast_function("to_mapping", args, body)
     body = []
     if needs_ctx:
         # Skipping the ctx append when nothing below could ever look past
@@ -583,7 +584,7 @@ def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
             keys.append(ast.Constant(value=f.name, **POSITION))
             values.append(emit_to_wire(shapes[f.name], lambda name=f.name: ast_subscript("d", name), namespace))
         body.append(ast.Return(value=ast.Dict(keys=keys, values=values, **POSITION), **POSITION))
-        return ast_function("to_mapping", args, body, namespace)
+        return ast_function("to_mapping", args, body)
     # At least one `when()` field: its Python value is None exactly when
     # wire-absent (a Shape like ArrayShape/StructShape would crash trying to
     # convert a bare None), so its key is only added when not None.
@@ -617,10 +618,10 @@ def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
             case False:
                 body.append(assign)
     body.append(ast.Return(value=ast_load("out"), **POSITION))
-    return ast_function("to_mapping", args, body, namespace)
+    return ast_function("to_mapping", args, body)
 
 
-def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
+def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names, namespace):
     """The mapping is expected to be complete for every non-`when()` field;
     a missing key raises KeyError rather than falling back to a default.
     Built via object.__new__ plus a direct __dict__ assignment, since
@@ -628,7 +629,8 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
     already known by name. A `when()` field is the one exception: the core
     omits its key when the predicate was false, so it gets its own presence
     check and default."""
-    namespace = {"_cls": cls, "_new": object.__new__}
+    namespace["_cls"] = cls
+    namespace["_new"] = object.__new__
     args = ast_signature(["mapping", "ctx"], defaults=[ast.Tuple(elts=[], ctx=LOAD, **POSITION)])
     new_self = ast.Assign(
         targets=[ast.Name(id="self", ctx=STORE, **POSITION)],
@@ -645,7 +647,7 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
             ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("mapping"), **POSITION),
             ast.Return(value=ast_load("self"), **POSITION),
         ]
-        return ast_function("from_mapping", args, body, namespace)
+        return ast_function("from_mapping", args, body)
     body = []
     if needs_ctx:
         body.append(ast_ctx_push("mapping"))
@@ -663,7 +665,7 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
             )
         )
         body.append(ast.Return(value=ast_load("self"), **POSITION))
-        return ast_function("from_mapping", args, body, namespace)
+        return ast_function("from_mapping", args, body)
     # At least one `when()` field: build the instance dict incrementally so
     # each one can fall back to its own default when the core's mapping
     # doesn't have that key at all (predicate was false at pack time).
@@ -697,7 +699,7 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
             body.append(present)
     body.append(ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("d"), **POSITION))
     body.append(ast.Return(value=ast_load("self"), **POSITION))
-    return ast_function("from_mapping", args, body, namespace)
+    return ast_function("from_mapping", args, body)
 
 
 def ensure_resolved(cls):
@@ -750,13 +752,15 @@ def ensure_resolved(cls):
     # one, for this class, skips the wire_fields/Shape interpretive loop
     # entirely -- see the module docstring for why this can't just be
     # inherited from an ancestor.
+    namespace = {}
     init, to_mapping, from_mapping = compile_functions(
         cls,
         [
-            compile_init(fields, no_input_names),
-            compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names),
-            compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names),
+            compile_init(fields, no_input_names, namespace),
+            compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names, namespace),
+            compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names, namespace),
         ],
+        namespace,
     )
     cls.__init__ = init
     cls.to_mapping = to_mapping
