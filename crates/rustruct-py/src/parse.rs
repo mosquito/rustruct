@@ -23,7 +23,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
 
-use rustruct_core::program::IntPrim;
+use rustruct_core::program::{IntPrim, MAX_DEPTH};
 use rustruct_core::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
 
 use crate::schema_err;
@@ -48,6 +48,12 @@ use crate::schema_err;
 /// by the frame check, and nobody writes an array of arrays of arrays
 /// sixty deep.
 pub const MAX_SCHEMA_DEPTH: usize = 64;
+
+// The floor above, checked rather than described. The two are equal today
+// and still not the same limit: this one is bounded by the C stack the
+// recursion runs on, `MAX_DEPTH` by frames `unpack` keeps in a `Vec`.
+// Raising that one must not quietly raise this one.
+const _: () = assert!(MAX_SCHEMA_DEPTH >= MAX_DEPTH);
 
 /// The same cap for expression tuples, which nest independently of types.
 ///
