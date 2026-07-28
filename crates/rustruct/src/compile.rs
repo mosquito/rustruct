@@ -4,8 +4,8 @@ use crate::digest::Algo;
 use crate::error::{SRes, SchemaError};
 use crate::expr::{Expr, Ins, EXPR_STACK};
 use crate::program::{
-    BitItem, Common, CountSrc, Enc, Encodings, FixKind, FixedItem, FlagItem, Inv, Key, LenSrc, Op,
-    Over, Program, Reg, RestPolicies, MAX_DEPTH, MAX_REGS, MAX_SPANS,
+    BitItem, Common, CountSrc, Enc, FixKind, FixedItem, FlagItem, Inv, Key, LenSrc, Op, Over,
+    Program, Reg, ENCODINGS, MAX_DEPTH, MAX_REGS, MAX_SPANS, REST_POLICIES,
 };
 use crate::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
 
@@ -555,7 +555,7 @@ impl C<'_> {
                         is_bool: mask.count_ones() == 1,
                     });
                 }
-                let rest = RestPolicies::parse(rest.as_str()).map_err(err)?;
+                let rest = REST_POLICIES.parse(rest.as_str()).map_err(err)?;
                 let op = Op::Flags {
                     prim: *base,
                     be,
@@ -960,7 +960,7 @@ fn parse_enc(encoding: &str, errors: &str) -> SRes<Enc> {
             "errors={errors:?} is not supported by the v1 core (only \"strict\")"
         )));
     }
-    Encodings::parse(encoding).map_err(err)
+    ENCODINGS.parse(encoding).map_err(err)
 }
 
 fn parse_algo(name: &str, ov: &CrcOverrides) -> SRes<Algo> {

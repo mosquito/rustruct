@@ -23,124 +23,209 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
 
-use rustruct_core::program::IntPrim;
+use rustruct_core::program::{IntPrim, MAX_DEPTH};
 use rustruct_core::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
 
 use crate::schema_err;
 
 /// How deeply a schema may nest before parsing gives up.
 ///
-/// `parse_type`/`parse_type_spec`/`parse_fields` are mutually recursive over
-/// caller-supplied data, so without a cap a deep enough schema overflows the
-/// C stack and kills the interpreter outright. The core caps struct nesting
-/// at 64 frames when unpacking, so anything past that already fails every
-/// decode; this sits comfortably above it.
-pub const MAX_SCHEMA_DEPTH: usize = 128;
+/// `parse_type`/`parse_type_spec`/`parse_fields` are mutually recursive
+/// over caller-supplied data, so without a cap a deep enough schema
+/// overflows the C stack and kills the interpreter outright -- a SIGSEGV,
+/// with nothing to catch. Nothing else stands between the two: `compile`
+/// checks the frames a schema would need, but only once parsing has
+/// already survived to hand it a program.
+///
+/// The floor is `MAX_DEPTH`: unpacking allows 64 struct frames, and a
+/// schema the decoder can handle has to get as far as compiling. The
+/// ceiling is the stack, which is not the 8 MB of the main thread -- a
+/// thread gets 512 KB by default, where a level of struct nesting costs
+/// about 3 KB and the recursion dies somewhere past 160. At 64 that
+/// leaves room to spare and survives a 256 KB stack; at 128 it did not.
+///
+/// Nothing real nests this far anyway: structs are already capped at 63
+/// by the frame check, and nobody writes an array of arrays of arrays
+/// sixty deep.
+pub const MAX_SCHEMA_DEPTH: usize = 64;
+
+// The floor above, checked rather than described. The two are equal today
+// and still not the same limit: this one is bounded by the C stack the
+// recursion runs on, `MAX_DEPTH` by frames `unpack` keeps in a `Vec`.
+// Raising that one must not quietly raise this one.
+const _: () = assert!(MAX_SCHEMA_DEPTH >= MAX_DEPTH);
 
 /// The same cap for expression tuples, which nest independently of types.
+///
+/// Left higher because it is far cheaper: an expression level costs about
+/// 0.6 KB against a type level's 3 KB, so 128 of them still fit a stack
+/// this side of tiny.
 const MAX_EXPR_DEPTH: usize = 128;
 
 // ---------- closed sets ----------
 
-use rustruct_core::closed_set;
+use rustruct_core::names::ClosedSet;
 
-closed_set!(
-    Bo,
-    ByteOrder,
-    "byteorder",
-    "only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes \
-     the wire format depend on the running machine",
-    [
-        ByteOrder::Big => "big",
-        // A struct-module-style spelling of `!`, i.e. big -- an entry of its
-        // own rather than an alias, because it is published as a member.
-        ByteOrder::Big => "network",
-        ByteOrder::Little => "little",
-    ]
-);
+/// Byte orders `compile()` takes. `network` is a struct-module-style
+/// spelling of `!`, i.e. big -- an entry of its own rather than a spelling
+/// of `"big"`, because it is published as a `rustruct.ByteOrder` member.
+static BYTEORDERS: ClosedSet<ByteOrder> = ClosedSet {
+    what: "byteorder",
+    allowed: "only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes \
+              the wire format depend on the running machine",
+    eq: str::eq,
+    names: &[
+        ("big", ByteOrder::Big),
+        ("network", ByteOrder::Big),
+        ("little", ByteOrder::Little),
+    ],
+    aliases: &[],
+};
 
-closed_set!(
-    Prim,
-    IntPrim,
-    "an integer kind",
-    "only \"u8\"/\"i8\" through \"u64\"/\"i64\"",
-    [
-        IntPrim::U8 => "u8",
-        IntPrim::I8 => "i8",
-        IntPrim::U16 => "u16",
-        IntPrim::I16 => "i16",
-        IntPrim::U32 => "u32",
-        IntPrim::I32 => "i32",
-        IntPrim::U64 => "u64",
-        IntPrim::I64 => "i64",
-    ]
-);
+/// A byte order named at the top level of `compile()`.
+pub fn byteorder(s: &str) -> PyResult<ByteOrder> {
+    BYTEORDERS.parse(s).map_err(schema_err)
+}
 
-closed_set!(
-    Op,
-    BinOp,
-    "an operator",
-    "one of add/sub/mul/div/shl/shr/and/or/xor/eq/ne/lt/le/gt/ge",
-    [
-        BinOp::Add => "add",
-        BinOp::Sub => "sub",
-        BinOp::Mul => "mul",
-        BinOp::Div => "div",
-        BinOp::Shl => "shl",
-        BinOp::Shr => "shr",
-        BinOp::And => "and",
-        BinOp::Or => "or",
-        BinOp::Xor => "xor",
-        BinOp::Eq => "eq",
-        BinOp::Ne => "ne",
-        BinOp::Lt => "lt",
-        BinOp::Le => "le",
-        BinOp::Gt => "gt",
-        BinOp::Ge => "ge",
-    ]
-);
+/// The fixed-width integer kinds.
+static INT_PRIMS: ClosedSet<IntPrim> = ClosedSet {
+    what: "an integer kind",
+    allowed: "only \"u8\"/\"i8\" through \"u64\"/\"i64\"",
+    eq: str::eq,
+    names: &[
+        ("u8", IntPrim::U8),
+        ("i8", IntPrim::I8),
+        ("u16", IntPrim::U16),
+        ("i16", IntPrim::I16),
+        ("u32", IntPrim::U32),
+        ("i32", IntPrim::I32),
+        ("u64", IntPrim::U64),
+        ("i64", IntPrim::I64),
+    ],
+    aliases: &[],
+};
+
+/// The heads an expression tuple can carry.
+static BINOPS: ClosedSet<BinOp> = ClosedSet {
+    what: "an operator",
+    allowed: "one of add/sub/mul/div/shl/shr/and/or/xor/eq/ne/lt/le/gt/ge",
+    eq: str::eq,
+    names: &[
+        ("add", BinOp::Add),
+        ("sub", BinOp::Sub),
+        ("mul", BinOp::Mul),
+        ("div", BinOp::Div),
+        ("shl", BinOp::Shl),
+        ("shr", BinOp::Shr),
+        ("and", BinOp::And),
+        ("or", BinOp::Or),
+        ("xor", BinOp::Xor),
+        ("eq", BinOp::Eq),
+        ("ne", BinOp::Ne),
+        ("lt", BinOp::Lt),
+        ("le", BinOp::Le),
+        ("gt", BinOp::Gt),
+        ("ge", BinOp::Ge),
+    ],
+    aliases: &[],
+};
 
 // ---------- where parsing is ----------
 
 /// How deep (for the cap) and where (for messages).
-#[derive(Clone)]
-pub struct Ctx {
+///
+/// The path is a chain of borrowed segments rather than a string grown as
+/// parsing descends. It is read in one place -- to say which field a
+/// failure came from -- so building it eagerly bought nothing and cost an
+/// allocation per field and per level, which on a nested schema was most
+/// of what compiling one cost.
+pub struct Ctx<'a> {
     depth: usize,
-    path: String,
+    parent: Option<&'a Ctx<'a>>,
+    seg: Seg<'a>,
 }
 
-impl Ctx {
-    pub fn root() -> Ctx {
+/// How one level spells itself in a path.
+enum Seg<'a> {
+    /// Adds nothing: the root, or a nested field list, which is already
+    /// under its own field's name.
+    Nothing,
+    /// A field: `.name`, or bare with nothing above it.
+    Field(&'a str),
+    /// Joined with no separator: `[]`, `?default`.
+    Suffix(&'a str),
+    /// A switch branch, spelled `?tag`.
+    Case(i64),
+}
+
+impl<'a> Ctx<'a> {
+    pub fn root() -> Ctx<'static> {
         Ctx {
             depth: 0,
-            path: String::new(),
+            parent: None,
+            seg: Seg::Nothing,
         }
     }
-    /// A nested type in an elem/case/default/then position, under its own
-    /// path segment if it has one.
-    fn child(&self, segment: &str) -> Ctx {
+
+    fn nest(&'a self, seg: Seg<'a>, deeper: bool) -> Ctx<'a> {
         Ctx {
-            depth: self.depth + 1,
-            path: format!("{}{segment}", self.path),
+            depth: self.depth + usize::from(deeper),
+            parent: Some(self),
+            seg,
         }
     }
-    /// A nested field list: deeper, but the path segment is the field's own.
-    fn deeper(&self) -> Ctx {
-        Ctx {
-            depth: self.depth + 1,
-            path: self.path.clone(),
-        }
+
+    /// A nested field list: deeper, but named by the field it belongs to.
+    fn deeper(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Nothing, true)
+    }
+    /// An array's element type.
+    fn elem(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Suffix("[]"), true)
+    }
+    /// A `when`'s `then`, which shares its field's name.
+    fn then(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Nothing, true)
+    }
+    /// A switch's fallback branch.
+    fn default_branch(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Suffix("?default"), true)
+    }
+    /// One switch branch.
+    fn case(&'a self, tag: i64) -> Ctx<'a> {
+        self.nest(Seg::Case(tag), true)
     }
     /// One named (or deliberately unnamed) field inside this scope.
-    fn field(&self, leaf: &str) -> Ctx {
-        Ctx {
-            depth: self.depth,
-            path: if self.path.is_empty() {
-                leaf.to_string()
-            } else {
-                format!("{}.{leaf}", self.path)
-            },
+    fn field(&'a self, leaf: &'a str) -> Ctx<'a> {
+        self.nest(Seg::Field(leaf), false)
+    }
+
+    /// Where this is, as `frame.rows[].x` -- built only to put in a message.
+    fn path(&self) -> String {
+        let mut chain = Vec::new();
+        let mut here = Some(self);
+        while let Some(ctx) = here {
+            chain.push(&ctx.seg);
+            here = ctx.parent;
         }
+        let mut out = String::new();
+        for seg in chain.iter().rev() {
+            match seg {
+                Seg::Nothing => {}
+                Seg::Field(name) => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(name);
+                }
+                Seg::Suffix(text) => out.push_str(text),
+                Seg::Case(tag) => {
+                    out.push('?');
+                    out.push_str(&tag.to_string());
+                }
+            }
+        }
+        out
     }
 }
 
@@ -178,54 +263,56 @@ fn opt_get<'py>(opts: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<'
     }
 }
 
-/// Edit distance for the near-miss hint below -- `difflib`'s job on the
-/// Python side, in twenty lines and with no dependency.
+/// Distance in edits, counting a swapped pair of adjacent letters as one.
 ///
-/// Optimal string alignment, not plain Levenshtein: a swapped pair of
-/// adjacent letters costs one edit, not two. That is the single commonest
-/// typo (`lne`, `alog`, `siez`), and counting it as two puts it outside the
-/// 0.6 cutoff, which is exactly where a hint is most wanted.
-fn edits(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
-    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, row) in d.iter_mut().enumerate() {
-        row[0] = i;
-        for (j, cell) in row.iter_mut().enumerate() {
-            if i == 0 {
-                *cell = j;
-            }
-        }
-    }
+/// Optimal string alignment rather than plain Levenshtein, because that
+/// swap is the commonest typo (`siez`, `conut`, `byteodrer`) and charging
+/// it two edits puts it out of reach of the cutoff below -- which is
+/// exactly where a suggestion is most wanted.
+fn distance(a: &[char], b: &[char]) -> usize {
+    // Three rows, not the whole matrix: a substitution looks back one row
+    // and a transposition two, and nothing looks back further.
+    let mut before = vec![0usize; b.len() + 1];
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0usize; b.len() + 1];
+
     for i in 1..=a.len() {
+        current[0] = i;
         for j in 1..=b.len() {
-            let mut best = (d[i - 1][j] + 1)
-                .min(d[i][j - 1] + 1)
-                .min(d[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]));
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                best = best.min(d[i - 2][j - 2] + 1);
+            let substitute = previous[j - 1] + usize::from(a[i - 1] != b[j - 1]);
+            let delete = previous[j] + 1;
+            let insert = current[j - 1] + 1;
+            let mut best = substitute.min(delete).min(insert);
+            let swapped = i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1];
+            if swapped {
+                best = best.min(before[j - 2] + 1);
             }
-            d[i][j] = best;
+            current[j] = best;
         }
+        // Rotate: today's row becomes yesterday's, and the row from two
+        // steps back is recycled as the next scratch row.
+        std::mem::swap(&mut before, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
     }
-    d[a.len()][b.len()]
+    previous[b.len()]
 }
 
-/// The closest accepted option to a misspelling, if anything is close
-/// enough. Declaration order breaks ties, so the message is deterministic.
-///
-/// Scored and cut off the way `difflib.get_close_matches` does -- twice the
-/// characters the two share over their combined length, accepted at 0.6 --
-/// so a one-letter option like `on` still gets a hint from `n`, which a
-/// distance-over-longest ratio would score at 0.5 and drop.
+/// The closest allowed name, if one is close enough to be worth saying --
+/// `difflib.get_close_matches`'s job on the Python side, at its own 0.6
+/// cutoff, scoring how much of the two names is shared.
 fn nearest<'a>(word: &str, allowed: &[&'a str]) -> Option<&'a str> {
+    const CUTOFF: f64 = 0.6;
+    let word: Vec<char> = word.chars().collect();
     let mut best: Option<&'a str> = None;
-    let mut best_score = 0.0f64;
-    let n = word.chars().count();
+    let mut best_score = 0.0;
     for &candidate in allowed {
-        let m = candidate.chars().count();
-        let shared = n.max(m).saturating_sub(edits(word, candidate));
-        let score = 2.0 * shared as f64 / (n + m).max(1) as f64;
-        if score >= 0.6 && score > best_score {
+        let other: Vec<char> = candidate.chars().collect();
+        let shared = word
+            .len()
+            .max(other.len())
+            .saturating_sub(distance(&word, &other));
+        let score = 2.0 * shared as f64 / (word.len() + other.len()).max(1) as f64;
+        if score >= CUTOFF && score > best_score {
             best_score = score;
             best = Some(candidate);
         }
@@ -238,11 +325,14 @@ fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResul
     // reads that as "not given", and a misspelling would otherwise sail
     // through as long as it happened to carry None.
     for key in opts.keys() {
-        let k: String = key
-            .extract()
-            .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?;
-        if !allowed.contains(&k.as_str()) {
-            return Err(schema_err(match nearest(&k, allowed) {
+        // Borrowed: this runs for every option of every field, and the name
+        // is only read.
+        let k = key
+            .cast::<PyString>()
+            .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?
+            .to_str()?;
+        if !allowed.contains(&k) {
+            return Err(schema_err(match nearest(k, allowed) {
                 Some(hint) => format!("{kind}: unknown option '{k}' (did you mean '{hint}'?)"),
                 None => format!("{kind}: unknown option '{k}'"),
             }));
@@ -258,7 +348,7 @@ fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResul
 
 macro_rules! simple {
     ($name:ident, $ty:ty, $what:literal) => {
-        fn $name(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<$ty> {
+        fn $name(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<$ty> {
             v.extract()
                 .map_err(|_| schema_err(format!("{kind}: {key} must be {}", $what)))
         }
@@ -272,17 +362,21 @@ simple!(p_i128, i128, "an int");
 simple!(p_bytes, Vec<u8>, "bytes");
 simple!(p_string, String, "a str");
 
-fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ByteOrder> {
-    Bo::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
+fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<ByteOrder> {
+    BYTEORDERS
+        .parse(&p_string(v, kind, key, _ctx)?)
+        .map_err(schema_err)
 }
 
-fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<IntPrim> {
-    Prim::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
+fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<IntPrim> {
+    INT_PRIMS
+        .parse(&p_string(v, kind, key, _ctx)?)
+        .map_err(schema_err)
 }
 
 /// Rejected here rather than at compile time, so the message names the
 /// field that wrote it.
-fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<u8> {
+fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<u8> {
     let n: i64 = v
         .extract()
         .map_err(|_| schema_err(format!("{kind}: {key} must be an int in 1..64")))?;
@@ -293,27 +387,29 @@ fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<
 }
 
 /// `int | "*" | ("ref", name) | (op, a, b)`.
-fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
+fn expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, depth: usize) -> PyResult<ExprIn> {
+    // `kind`/`key` rather than a formatted label: this runs once per node
+    // of every expression in the schema, and the label is only ever needed
+    // to build a message, so it is put together in the error paths.
     let expected = || {
         schema_err(format!(
-            "{what}: expected an int, '*', or a tuple starting with an operator"
+            "{kind}: {key}: expected an int, '*', or a tuple starting with an operator"
         ))
     };
     if depth > MAX_EXPR_DEPTH {
         return Err(schema_err(format!(
-            "{what} nests deeper than {MAX_EXPR_DEPTH} levels"
+            "{kind}: {key} nests deeper than {MAX_EXPR_DEPTH} levels"
         )));
     }
     // bool is an int subclass, so an unguarded `len=True` sails through as
     // len=1 and packs a one-byte field with no complaint anywhere.
     if v.cast::<PyBool>().is_ok() {
         return Err(schema_err(format!(
-            "{what}: a bool is not a length; use an int, '*', or a reference"
+            "{kind}: {key}: a bool is not a length; use an int, '*', or a reference"
         )));
     }
     if let Ok(s) = v.cast::<PyString>() {
-        let s: String = s.extract()?;
-        return if s == "*" {
+        return if s.to_str()? == "*" {
             Ok(ExprIn::Greedy)
         } else {
             Err(expected())
@@ -323,13 +419,16 @@ fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
         return v
             .extract()
             .map(ExprIn::Imm)
-            .map_err(|_| schema_err(format!("{what} literal does not fit in i64")));
+            .map_err(|_| schema_err(format!("{kind}: {key} literal does not fit in i64")));
     }
     let t = v.cast::<PyTuple>().map_err(|_| expected())?;
-    let head: String = match t.get_item(0) {
-        Ok(h) => h.extract().map_err(|_| expected())?,
-        Err(_) => return Err(expected()),
-    };
+    let head_obj = t.get_item(0).map_err(|_| expected())?;
+    // Borrowed, not extracted: a `String` per operator is an allocation
+    // per node, and the name is only read.
+    let head = head_obj
+        .cast::<PyString>()
+        .map_err(|_| expected())?
+        .to_str()?;
     if head == "ref" {
         if t.len() != 2 {
             return Err(schema_err(
@@ -348,22 +447,21 @@ fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
         )));
     }
     Ok(ExprIn::Bin(
-        Op::parse(&head).map_err(schema_err)?,
-        Box::new(expr(&t.get_item(1)?, what, depth + 1)?),
-        Box::new(expr(&t.get_item(2)?, what, depth + 1)?),
+        BINOPS.parse(head).map_err(schema_err)?,
+        Box::new(expr(&t.get_item(1)?, kind, key, depth + 1)?),
+        Box::new(expr(&t.get_item(2)?, kind, key, depth + 1)?),
     ))
 }
 
-fn p_expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ExprIn> {
-    expr(v, &format!("{kind}: {key}"), 0)
+fn p_expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<ExprIn> {
+    expr(v, kind, key, 0)
 }
 
-fn p_over(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, _ctx: &Ctx) -> PyResult<OverIn> {
+fn p_over(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, _ctx: &Ctx<'_>) -> PyResult<OverIn> {
     let shape = || schema_err("digest: over is either \"*\" or a tuple of names");
     // A str is iterable, so "*" has to be taken before the name list is.
     if let Ok(s) = v.cast::<PyString>() {
-        let s: String = s.extract()?;
-        return if s == "*" {
+        return if s.to_str()? == "*" {
             Ok(OverIn::Star)
         } else {
             Err(shape())
@@ -383,7 +481,7 @@ fn p_names(
     v: &Bound<'_, PyAny>,
     _kind: &str,
     _key: &str,
-    _ctx: &Ctx,
+    _ctx: &Ctx<'_>,
 ) -> PyResult<Vec<(String, u64)>> {
     let shape = || schema_err("flags: names must be a sequence of (str, int) pairs");
     let mut names = Vec::new();
@@ -393,27 +491,32 @@ fn p_names(
     Ok(names)
 }
 
-fn p_fields(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<Vec<FieldIn>> {
+fn p_fields(
+    v: &Bound<'_, PyAny>,
+    _kind: &str,
+    _key: &str,
+    ctx: &Ctx<'_>,
+) -> PyResult<Vec<FieldIn>> {
     parse_fields(v, &ctx.deeper())
 }
 
-fn p_elem(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child("[]"))
+fn p_elem(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.elem())
 }
 
-fn p_then(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child(""))
+fn p_then(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.then())
 }
 
-fn p_default(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child("?default"))
+fn p_default(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.default_branch())
 }
 
 fn p_cases(
     v: &Bound<'_, PyAny>,
     _kind: &str,
     _key: &str,
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
 ) -> PyResult<Vec<(i64, TypeIn)>> {
     let shape = || schema_err("switch: a cases element must be a (int, (kind, opts)) tuple");
     let mut cases = Vec::new();
@@ -429,10 +532,7 @@ fn p_cases(
             return Err(bad_tag());
         }
         let tag: i64 = tag_obj.extract().map_err(|_| bad_tag())?;
-        cases.push((
-            tag,
-            parse_type_spec(&pair.get_item(1)?, &ctx.child(&format!("?{tag}")))?,
-        ));
+        cases.push((tag, parse_type_spec(&pair.get_item(1)?, &ctx.case(tag))?));
     }
     Ok(cases)
 }
@@ -479,7 +579,7 @@ macro_rules! kinds {
     ($kind:ident: $(
         [$($k:literal),+ $(,)?] { $($opt:ident : $mode:tt $parse:expr),* $(,)? } => $build:expr
     );+ $(;)?) => {
-        fn parse_type($kind: &str, opts: &Bound<'_, PyDict>, ctx: &Ctx) -> PyResult<TypeIn> {
+        fn parse_type($kind: &str, opts: &Bound<'_, PyDict>, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
             if ctx.depth > MAX_SCHEMA_DEPTH {
                 return Err(schema_err(format!(
                     "schema nests deeper than {MAX_SCHEMA_DEPTH} levels"
@@ -516,7 +616,7 @@ kinds! {
     ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"] {
         byteorder: opt p_byteorder,
         r#const:   opt p_i128,
-    } => TypeIn::Int { prim: Prim::parse(kind).map_err(schema_err)?, byteorder, const_: r#const };
+    } => TypeIn::Int { prim: INT_PRIMS.parse(kind).map_err(schema_err)?, byteorder, const_: r#const };
 
     ["f32", "f64"] {
         byteorder: opt p_byteorder,
@@ -624,11 +724,13 @@ kinds! {
 
 // ---------- the tuple forms around it ----------
 
-fn kind_str(obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    obj.extract().map_err(|_| {
+/// Borrowed from the caller's tuple: the name is matched, never kept.
+fn kind_str<'a>(obj: &'a Bound<'_, PyAny>) -> PyResult<&'a str> {
+    let bad = || {
         let shown = obj.repr().map(|r| r.to_string()).unwrap_or_default();
         schema_err(format!("unknown kind {shown}"))
-    })
+    };
+    obj.cast::<PyString>().map_err(|_| bad())?.to_str()
 }
 
 fn opts_dict<'py>(obj: &Bound<'py, PyAny>, kind: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -638,19 +740,20 @@ fn opts_dict<'py>(obj: &Bound<'py, PyAny>, kind: &str) -> PyResult<Bound<'py, Py
 }
 
 /// `(kind, opts)` -- a type in the elem/case/default/then position.
-fn parse_type_spec(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<TypeIn> {
+fn parse_type_spec(obj: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
     let shape = || schema_err("a type spec must be a (kind, opts) tuple");
     let t = obj.cast::<PyTuple>().map_err(|_| shape())?;
     if t.len() != 2 {
         return Err(shape());
     }
-    let kind = kind_str(&t.get_item(0)?)?;
-    let opts = opts_dict(&t.get_item(1)?, &kind)?;
-    parse_type(&kind, &opts, ctx)
+    let kind_obj = t.get_item(0)?;
+    let kind = kind_str(&kind_obj)?;
+    let opts = opts_dict(&t.get_item(1)?, kind)?;
+    parse_type(kind, &opts, ctx)
 }
 
 /// `(name, kind, opts)` -- one field, located on failure.
-fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
+fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<FieldIn> {
     let shape = || schema_err("a field must be a (name, kind, opts) tuple");
     let t = item.cast::<PyTuple>().map_err(|_| shape())?;
     if t.len() != 3 {
@@ -668,11 +771,12 @@ fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
     };
     let here = ctx.field(name.as_deref().unwrap_or("<unnamed>"));
     let ty = (|| {
-        let kind = kind_str(&t.get_item(1)?)?;
-        let opts = opts_dict(&t.get_item(2)?, &kind)?;
-        parse_type(&kind, &opts, &here)
+        let kind_obj = t.get_item(1)?;
+        let kind = kind_str(&kind_obj)?;
+        let opts = opts_dict(&t.get_item(2)?, kind)?;
+        parse_type(kind, &opts, &here)
     })()
-    .map_err(|e| locate(item.py(), e, &here.path))?;
+    .map_err(|e| locate(item.py(), e, &here.path()))?;
     Ok(FieldIn { name, ty })
 }
 
@@ -680,7 +784,7 @@ fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
 /// extraction goes through the sequence protocol, which would quietly stop
 /// accepting the generators, `map()` results and `dict.values()` views that
 /// work today.
-pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>> {
+pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<Vec<FieldIn>> {
     let mut out = Vec::new();
     for item in obj
         .try_iter()
@@ -698,30 +802,33 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
 /// exists only in Rust stays invisible to Python and simply goes unused.
 #[pyfunction]
 pub fn vocabulary(py: Python<'_>) -> PyResult<crate::Vocabulary> {
-    use rustruct_core::digest::Algos;
+    use rustruct_core::digest::ALGOS;
     use rustruct_core::error::Kind as ErrKind;
-    use rustruct_core::program::{Encodings, RestPolicies};
+    use rustruct_core::program::{ENCODINGS, REST_POLICIES};
 
     let d = PyDict::new(py);
-    d.set_item("byteorders", Bo::ALL)?;
-    d.set_item("int_prims", Prim::ALL)?;
-    d.set_item("binops", Op::ALL)?;
+    d.set_item("byteorders", BYTEORDERS.names().collect::<Vec<_>>())?;
+    d.set_item("int_prims", INT_PRIMS.names().collect::<Vec<_>>())?;
+    d.set_item("binops", BINOPS.names().collect::<Vec<_>>())?;
     d.set_item("error_kinds", ErrKind::ALL)?;
-    d.set_item("encodings", Encodings::ALL)?;
-    d.set_item("algos", Algos::ALL)?;
-    d.set_item("rest_policies", RestPolicies::ALL)?;
+    d.set_item("encodings", ENCODINGS.names().collect::<Vec<_>>())?;
+    d.set_item("algos", ALGOS.names().collect::<Vec<_>>())?;
+    d.set_item("rest_policies", REST_POLICIES.names().collect::<Vec<_>>())?;
 
     // Spellings a set takes without publishing as a name of its own -- for
     // most sets the same list, for encodings the aliases too. Published so
     // the alias coverage in `tests/test_vocabulary.py` is read off the core
     // rather than retyped.
     let accepted = PyDict::new(py);
-    accepted.set_item("byteorders", Bo::ACCEPTED)?;
-    accepted.set_item("int_prims", Prim::ACCEPTED)?;
-    accepted.set_item("binops", Op::ACCEPTED)?;
-    accepted.set_item("encodings", Encodings::ACCEPTED)?;
-    accepted.set_item("algos", Algos::ACCEPTED)?;
-    accepted.set_item("rest_policies", RestPolicies::ACCEPTED)?;
+    accepted.set_item("byteorders", BYTEORDERS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("int_prims", INT_PRIMS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("binops", BINOPS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("encodings", ENCODINGS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("algos", ALGOS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item(
+        "rest_policies",
+        REST_POLICIES.accepted().collect::<Vec<_>>(),
+    )?;
     d.set_item("accepted", accepted)?;
 
     let options = PyDict::new(py);

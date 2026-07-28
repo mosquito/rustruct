@@ -16,8 +16,12 @@ import common
 SUPPORTS = {"scalars", "vector", "telemetry"}
 
 
+def build_scalars(n):
+    return struct.Struct("!" + "H" * n)
+
+
 def make_scalars(n):
-    st = struct.Struct("!" + "H" * n)
+    st = build_scalars(n)
     names = [f"f{i}" for i in range(n)]
     values = dict(zip(names, common.scalars_values(n), strict=True))
 
@@ -31,12 +35,15 @@ def make_scalars(n):
     return pack, unpack
 
 
+def build_vector(_m):
+    return struct.Struct("!HH"), struct.Struct("!H")
+
+
 def make_vector(m):
     values = {
         "items": [{"a": a, "b": b} for a, b in common.vector_items(m)],
     }
-    item = struct.Struct("!HH")
-    count = struct.Struct("!H")
+    item, count = build_vector(m)
 
     def pack():
         records = values["items"]
@@ -63,12 +70,18 @@ def make_vector(m):
     return pack, unpack
 
 
+def build_telemetry(_m):
+    return (
+        struct.Struct("!BBHIQ16sIB"),
+        struct.Struct("!I"),
+        struct.Struct("!H"),
+        struct.Struct("!IBBHiiQH"),
+    )
+
+
 def make_telemetry(m):
     values = common.telemetry_values(m)
-    frame_fixed = struct.Struct("!BBHIQ16sIB")
-    frame_size = struct.Struct("!I")
-    record_count = struct.Struct("!H")
-    record_fixed = struct.Struct("!IBBHiiQH")
+    frame_fixed, frame_size, record_count, record_fixed = build_telemetry(m)
 
     def pack():
         source = values["source"].encode("utf-8")

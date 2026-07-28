@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crate::names::{loose_eq, ClosedSet};
+
 use crate::digest::Algo;
 use crate::expr::Expr;
 
@@ -105,20 +107,22 @@ pub enum Enc {
     Latin1,
 }
 
-crate::closed_set!(
-    /// Text encodings a `str`/`cstr` field can use.
-    ///
-    /// Spellings are compared with separators removed and case folded, so
-    /// `"UTF-8"`, `"utf8"` and `"utf_8"` all land on the same member --
-    /// which is why the aliases below are written the way a person would.
-    Encodings, Enc, "encoding", "utf-8/ascii/latin-1",
-    normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '_'], ""),
-    [
-        Enc::Utf8 => "utf-8",
-        Enc::Ascii => "ascii" | "us-ascii",
-        Enc::Latin1 => "latin-1" | "iso-8859-1",
-    ]
-);
+/// Text encodings a `str`/`cstr` field can use.
+///
+/// Matched loosely, so `"UTF-8"`, `"utf8"` and `"utf_8"` all land on the
+/// same member -- which is why the spellings are written the way a person
+/// would rather than in some normalized form.
+pub static ENCODINGS: ClosedSet<Enc> = ClosedSet {
+    what: "encoding",
+    allowed: "utf-8/ascii/latin-1",
+    eq: loose_eq,
+    names: &[
+        ("utf-8", Enc::Utf8),
+        ("ascii", Enc::Ascii),
+        ("latin-1", Enc::Latin1),
+    ],
+    aliases: &[("us-ascii", Enc::Ascii), ("iso-8859-1", Enc::Latin1)],
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestPolicy {
@@ -127,15 +131,18 @@ pub enum RestPolicy {
     Ignore,
 }
 
-crate::closed_set!(
-    /// What a `flags` field does with bits no name in it covers.
-    RestPolicies, RestPolicy, "rest policy", "keep/strict/ignore",
-    [
-        RestPolicy::Keep => "keep",
-        RestPolicy::Strict => "strict",
-        RestPolicy::Ignore => "ignore",
-    ]
-);
+/// What a `flags` field does with bits no name in it covers.
+pub static REST_POLICIES: ClosedSet<RestPolicy> = ClosedSet {
+    what: "rest policy",
+    allowed: "keep/strict/ignore",
+    eq: str::eq,
+    names: &[
+        ("keep", RestPolicy::Keep),
+        ("strict", RestPolicy::Strict),
+        ("ignore", RestPolicy::Ignore),
+    ],
+    aliases: &[],
+};
 
 /// Inversion of the linear expression `value = a*x + b`: during
 /// pack the derived register `reg` receives `x = (value - b) / a`.

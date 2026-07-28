@@ -332,83 +332,123 @@ def collect_refs(value, into):
 
 
 def ast_load(name):
-    return ast.Name(id=name, ctx=ast.Load())
+    return ast.Name(id=name, ctx=LOAD, **POSITION)
 
 
 def ast_call(func, args):
-    return ast.Call(func=func, args=args, keywords=[])
+    return ast.Call(func=func, args=args, keywords=[], **POSITION)
 
 
 def ast_bind(namespace, prefix, value):
     """Put `value` into the compiled function's globals under a fresh name
     and return a Name node loading it -- how generated code references
-    runtime objects (shapes, defaults, other classes' compiled methods)."""
+    runtime objects (shapes, defaults, other classes' compiled methods).
+
+    Fresh because the counter is the namespace's own size, so every class
+    must build all of its methods against one dict. Handing each method its
+    own and merging afterwards silently aliased a field's default onto
+    another's, since the counters restarted."""
     name = f"{prefix}{len(namespace)}"
+    assert name not in namespace, f"generated name {name!r} bound twice"
     namespace[name] = value
     return ast_load(name)
 
 
 def ast_subscript(owner, key):
-    return ast.Subscript(value=ast_load(owner), slice=ast.Constant(value=key), ctx=ast.Load())
+    return ast.Subscript(value=ast_load(owner), slice=ast.Constant(value=key, **POSITION), ctx=LOAD, **POSITION)
 
 
 def ast_subscript_store(owner, key):
-    return ast.Subscript(value=ast_load(owner), slice=ast.Constant(value=key), ctx=ast.Store())
+    return ast.Subscript(value=ast_load(owner), slice=ast.Constant(value=key, **POSITION), ctx=STORE, **POSITION)
 
 
 def ast_self_dict(ctx):
-    return ast.Attribute(value=ast_load("self"), attr="__dict__", ctx=ctx)
+    return ast.Attribute(value=ast_load("self"), attr="__dict__", ctx=ctx, **POSITION)
 
 
 def ast_ctx_push(frame):
     """ctx = (*ctx, <frame>)"""
     return ast.Assign(
-        targets=[ast.Name(id="ctx", ctx=ast.Store())],
+        targets=[ast.Name(id="ctx", ctx=STORE, **POSITION)],
         value=ast.Tuple(
-            elts=[ast.Starred(value=ast_load("ctx"), ctx=ast.Load()), ast_load(frame)],
-            ctx=ast.Load(),
+            elts=[ast.Starred(value=ast_load("ctx"), ctx=LOAD, **POSITION), ast_load(frame)],
+            ctx=LOAD,
+            **POSITION,
         ),
+        **POSITION,
     )
 
 
 def ast_signature(posargs, kwonlyargs=(), kw_defaults=(), defaults=()):
     return ast.arguments(
         posonlyargs=[],
-        args=[ast.arg(arg=a) for a in posargs],
+        args=[ast.arg(arg=a, **POSITION) for a in posargs],
         vararg=None,
-        kwonlyargs=[ast.arg(arg=a) for a in kwonlyargs],
+        kwonlyargs=[ast.arg(arg=a, **POSITION) for a in kwonlyargs],
         kw_defaults=list(kw_defaults),
         kwarg=None,
         defaults=list(defaults),
     )
 
 
-def ast_function(name, args, body, namespace):
-    """Compile a single FunctionDef built as an AST (never via source-string
-    templating) and return the resulting function, with `namespace` as its
-    globals."""
-    fn = ast.FunctionDef(name=name, args=args, body=body, decorator_list=[])
+# Every generated node shares one position, because the code it stands for
+# has no source to point at. `compile()` insists on having one, and the
+# alternative -- `ast.fix_missing_locations` -- walks the whole tree in
+# Python afterwards to fill them in, which costs more than compiling it.
+#
+# Start only: `compile()` does not ask for `end_lineno`/`end_col_offset`,
+# and carrying them made every node a third more expensive to build. They
+# would only ever have underlined a caret in a traceback, and everything
+# here already claims to be at line 1.
+POSITION: dict[str, Any] = {"lineno": 1, "col_offset": 0}
+
+# One each, shared by every node in every tree. A context is a marker: the
+# AST grammar gives `expr_context` no fields at all, so `_fields` and
+# `_attributes` are both empty and there is nothing in one to write, and
+# nothing to race on -- `compile()` only ever reads the tree.
+#
+# This is also what CPython itself does: every tree `ast.parse` returns
+# shares a single `Load` across all of its nodes, and the same one between
+# trees. Building a fresh context per node cost a hundred allocations a
+# class for nothing.
+LOAD = ast.Load()
+STORE = ast.Store()
+
+
+def ast_function(name, args, body):
+    """One FunctionDef built as an AST (never via source-string templating)."""
+    fn = ast.FunctionDef(name=name, args=args, body=body, decorator_list=[], **POSITION)
     # type_params: a FunctionDef field from PEP 695 (3.12+), required by
     # compile() on 3.12+ and simply unused before that. setattr(), since
     # typeshed's FunctionDef stub only declares this field for a 3.12+
     # target and this project's floor is 3.11.
     setattr(fn, "type_params", [])  # noqa: B010
-    module = ast.Module(body=[fn], type_ignores=[])
-    ast.fix_missing_locations(module)
-    exec(compile(module, f"<rustruct:{name}>", "exec"), namespace)
-    return namespace[name]
+    return fn
 
 
-def compile_init(fields, no_input_names):
+def compile_functions(cls, defs, namespace):
+    """Compile a class's generated methods together, and return them.
+
+    One `compile()` call rather than one per method: the call has a fixed
+    cost that dwarfs bodies this small, and every class needs three. They
+    share one globals dict, which is also the one `ast_bind` counted
+    against while building them -- see there for why that matters.
+    """
+    module = ast.Module(body=defs, type_ignores=[])
+    exec(compile(module, f"<rustruct:{cls.__name__}>", "exec"), namespace)
+    return [namespace[fn.name] for fn in defs]
+
+
+def compile_init(fields, no_input_names, namespace):
     """Generate a real __init__ with a genuine keyword-only signature, so
     CPython's own call-binding machinery (fast, C-level) handles required-
     vs-optional and rejects unknown keywords, instead of a Python-level loop
     popping from **kwargs and branching on default/default_factory/
     no_input_names per field per call."""
     if not fields:
-        return ast_function("__init__", ast_signature(["self"]), [ast.Pass()], {})
+        return ast_function("__init__", ast_signature(["self"]), [ast.Pass(**POSITION)])
 
-    namespace = {"_MISSING": MISSING}
+    namespace["_MISSING"] = MISSING
     kwonly, kw_defaults, body = [], [], []
     for f in fields:
         kwonly.append(f.name)
@@ -416,9 +456,12 @@ def compile_init(fields, no_input_names):
             factory = ast_bind(namespace, "_factory", f.default_factory)
             kw_defaults.append(ast_load("_MISSING"))
             value = ast.IfExp(
-                test=ast.Compare(left=ast_load(f.name), ops=[ast.Is()], comparators=[ast_load("_MISSING")]),
+                test=ast.Compare(
+                    left=ast_load(f.name), ops=[ast.Is()], comparators=[ast_load("_MISSING")], **POSITION
+                ),
                 body=ast_call(factory, []),
                 orelse=ast_load(f.name),
+                **POSITION,
             )
         elif f.default is not MISSING:
             kw_defaults.append(ast_bind(namespace, "_default", f.default))
@@ -426,19 +469,20 @@ def compile_init(fields, no_input_names):
         elif f.name in no_input_names:
             # derived/const: pack() always recomputes/overwrites this, so
             # there's nothing meaningful to require here.
-            kw_defaults.append(ast.Constant(value=None))
+            kw_defaults.append(ast.Constant(value=None, **POSITION))
             value = ast_load(f.name)
         else:
             kw_defaults.append(None)  # keyword-only with no default: required
             value = ast_load(f.name)
         body.append(
             ast.Assign(
-                targets=[ast.Attribute(value=ast_load("self"), attr=f.name, ctx=ast.Store())],
+                targets=[ast.Attribute(value=ast_load("self"), attr=f.name, ctx=STORE, **POSITION)],
                 value=value,
+                **POSITION,
             )
         )
     args = ast_signature(["self"], kwonlyargs=kwonly, kw_defaults=kw_defaults)
-    return ast_function("__init__", args, body, namespace)
+    return ast_function("__init__", args, body)
 
 
 def emit_to_python(shape, expr, namespace, depth=0):
@@ -466,12 +510,13 @@ def emit_to_python(shape, expr, namespace, depth=0):
             return ast.ListComp(
                 elt=inner,
                 generators=[
-                    ast.comprehension(target=ast.Name(id=var, ctx=ast.Store()), iter=expr(), ifs=[], is_async=0)
+                    ast.comprehension(target=ast.Name(id=var, ctx=STORE, **POSITION), iter=expr(), ifs=[], is_async=0)
                 ],
+                **POSITION,
             )
         case _:
             sh = ast_bind(namespace, "_sh", shape)
-            return ast_call(ast.Attribute(value=sh, attr="to_python", ctx=ast.Load()), [expr(), ast_load("ctx")])
+            return ast_call(ast.Attribute(value=sh, attr="to_python", ctx=LOAD, **POSITION), [expr(), ast_load("ctx")])
 
 
 def emit_to_wire(shape, expr, namespace, depth=0):
@@ -487,8 +532,9 @@ def emit_to_wire(shape, expr, namespace, depth=0):
             # <expr>.to_mapping(ctx) if isinstance(<expr>, Struct) else <expr>
             return ast.IfExp(
                 test=ast_call(ast_load("isinstance"), [expr(), ast_load("_Struct")]),
-                body=ast_call(ast.Attribute(value=expr(), attr="to_mapping", ctx=ast.Load()), [ast_load("ctx")]),
+                body=ast_call(ast.Attribute(value=expr(), attr="to_mapping", ctx=LOAD, **POSITION), [ast_load("ctx")]),
                 orelse=expr(),
+                **POSITION,
             )
         case ConvertShape(encode=encode):
             return ast_call(ast_bind(namespace, "_enc", encode), [expr()])
@@ -498,23 +544,24 @@ def emit_to_wire(shape, expr, namespace, depth=0):
             return ast.ListComp(
                 elt=inner,
                 generators=[
-                    ast.comprehension(target=ast.Name(id=var, ctx=ast.Store()), iter=expr(), ifs=[], is_async=0)
+                    ast.comprehension(target=ast.Name(id=var, ctx=STORE, **POSITION), iter=expr(), ifs=[], is_async=0)
                 ],
+                **POSITION,
             )
         case _:
             sh = ast_bind(namespace, "_sh", shape)
-            return ast_call(ast.Attribute(value=sh, attr="to_wire", ctx=ast.Load()), [expr(), ast_load("ctx")])
+            return ast_call(ast.Attribute(value=sh, attr="to_wire", ctx=LOAD, **POSITION), [expr(), ast_load("ctx")])
 
 
-def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
-    namespace = {"_Struct": Struct}
-    args = ast_signature(["self", "ctx"], defaults=[ast.Tuple(elts=[], ctx=ast.Load())])
+def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names, namespace):
+    namespace["_Struct"] = Struct
+    args = ast_signature(["self", "ctx"], defaults=[ast.Tuple(elts=[], ctx=LOAD, **POSITION)])
     if not no_input_names and not cond_names and all(shapes[f.name] is SCALAR_SHAPE for f in fields):
         # All-scalar, nothing omitted: one C-level dict copy of the
         # instance dict beats a per-key literal (the core ignores any
         # stray extra keys on pack, verified).
-        body = [ast.Return(value=ast_call(ast_load("dict"), [ast_self_dict(ast.Load())]))]
-        return ast_function("to_mapping", args, body, namespace)
+        body = [ast.Return(value=ast_call(ast_load("dict"), [ast_self_dict(ast.Load())]), **POSITION)]
+        return ast_function("to_mapping", args, body)
     body = []
     if needs_ctx:
         # Skipping the ctx append when nothing below could ever look past
@@ -522,7 +569,9 @@ def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
         # common case for e.g. an array of plain-scalar structs (see
         # shape_needs_ctx).
         body.append(ast_ctx_push("self"))
-    body.append(ast.Assign(targets=[ast.Name(id="d", ctx=ast.Store())], value=ast_self_dict(ast.Load())))
+    body.append(
+        ast.Assign(targets=[ast.Name(id="d", ctx=STORE, **POSITION)], value=ast_self_dict(ast.Load()), **POSITION)
+    )
     if not cond_names:
         # No conditionally-present field: still one dict literal, just
         # built from statement-free key/value lists (the common case).
@@ -532,37 +581,47 @@ def compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names):
                 # Derived/const/digest: pack() always recomputes/overwrites
                 # it, so it is omitted.
                 continue
-            keys.append(ast.Constant(value=f.name))
+            keys.append(ast.Constant(value=f.name, **POSITION))
             values.append(emit_to_wire(shapes[f.name], lambda name=f.name: ast_subscript("d", name), namespace))
-        body.append(ast.Return(value=ast.Dict(keys=keys, values=values)))
-        return ast_function("to_mapping", args, body, namespace)
+        body.append(ast.Return(value=ast.Dict(keys=keys, values=values, **POSITION), **POSITION))
+        return ast_function("to_mapping", args, body)
     # At least one `when()` field: its Python value is None exactly when
     # wire-absent (a Shape like ArrayShape/StructShape would crash trying to
     # convert a bare None), so its key is only added when not None.
-    body.append(ast.Assign(targets=[ast.Name(id="out", ctx=ast.Store())], value=ast.Dict(keys=[], values=[])))
+    body.append(
+        ast.Assign(
+            targets=[ast.Name(id="out", ctx=STORE, **POSITION)],
+            value=ast.Dict(keys=[], values=[], **POSITION),
+            **POSITION,
+        )
+    )
     for f in fields:
         if f.name in no_input_names:
             continue
         value_expr = emit_to_wire(shapes[f.name], lambda name=f.name: ast_subscript("d", name), namespace)
-        assign = ast.Assign(targets=[ast_subscript_store("out", f.name)], value=value_expr)
+        assign = ast.Assign(targets=[ast_subscript_store("out", f.name)], value=value_expr, **POSITION)
         match f.name in cond_names:
             case True:
                 body.append(
                     ast.If(
                         test=ast.Compare(
-                            left=ast_subscript("d", f.name), ops=[ast.IsNot()], comparators=[ast.Constant(value=None)]
+                            left=ast_subscript("d", f.name),
+                            ops=[ast.IsNot()],
+                            comparators=[ast.Constant(value=None, **POSITION)],
+                            **POSITION,
                         ),
                         body=[assign],
                         orelse=[],
+                        **POSITION,
                     )
                 )
             case False:
                 body.append(assign)
-    body.append(ast.Return(value=ast_load("out")))
-    return ast_function("to_mapping", args, body, namespace)
+    body.append(ast.Return(value=ast_load("out"), **POSITION))
+    return ast_function("to_mapping", args, body)
 
 
-def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
+def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names, namespace):
     """The mapping is expected to be complete for every non-`when()` field;
     a missing key raises KeyError rather than falling back to a default.
     Built via object.__new__ plus a direct __dict__ assignment, since
@@ -570,11 +629,13 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
     already known by name. A `when()` field is the one exception: the core
     omits its key when the predicate was false, so it gets its own presence
     check and default."""
-    namespace = {"_cls": cls, "_new": object.__new__}
-    args = ast_signature(["mapping", "ctx"], defaults=[ast.Tuple(elts=[], ctx=ast.Load())])
+    namespace["_cls"] = cls
+    namespace["_new"] = object.__new__
+    args = ast_signature(["mapping", "ctx"], defaults=[ast.Tuple(elts=[], ctx=LOAD, **POSITION)])
     new_self = ast.Assign(
-        targets=[ast.Name(id="self", ctx=ast.Store())],
+        targets=[ast.Name(id="self", ctx=STORE, **POSITION)],
         value=ast_call(ast_load("_new"), [ast_load("_cls")]),
+        **POSITION,
     )
     if not cond_names and all(shapes[f.name] is SCALAR_SHAPE for f in fields):
         # All-scalar, nothing conditionally absent: adopt the dict the core
@@ -583,10 +644,10 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
         # missing on purpose, hence the cond_names branch below.
         body = [
             new_self,
-            ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("mapping")),
-            ast.Return(value=ast_load("self")),
+            ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("mapping"), **POSITION),
+            ast.Return(value=ast_load("self"), **POSITION),
         ]
-        return ast_function("from_mapping", args, body, namespace)
+        return ast_function("from_mapping", args, body)
     body = []
     if needs_ctx:
         body.append(ast_ctx_push("mapping"))
@@ -594,37 +655,51 @@ def compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names):
     if not cond_names:
         keys, values = [], []
         for f in fields:
-            keys.append(ast.Constant(value=f.name))
+            keys.append(ast.Constant(value=f.name, **POSITION))
             values.append(
                 emit_to_python(shapes[f.name], lambda name=f.name: ast_subscript("mapping", name), namespace)
             )
-        body.append(ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast.Dict(keys=keys, values=values)))
-        body.append(ast.Return(value=ast_load("self")))
-        return ast_function("from_mapping", args, body, namespace)
+        body.append(
+            ast.Assign(
+                targets=[ast_self_dict(ast.Store())], value=ast.Dict(keys=keys, values=values, **POSITION), **POSITION
+            )
+        )
+        body.append(ast.Return(value=ast_load("self"), **POSITION))
+        return ast_function("from_mapping", args, body)
     # At least one `when()` field: build the instance dict incrementally so
     # each one can fall back to its own default when the core's mapping
     # doesn't have that key at all (predicate was false at pack time).
-    body.append(ast.Assign(targets=[ast.Name(id="d", ctx=ast.Store())], value=ast.Dict(keys=[], values=[])))
+    body.append(
+        ast.Assign(
+            targets=[ast.Name(id="d", ctx=STORE, **POSITION)],
+            value=ast.Dict(keys=[], values=[], **POSITION),
+            **POSITION,
+        )
+    )
     for f in fields:
         value_expr = emit_to_python(shapes[f.name], lambda name=f.name: ast_subscript("mapping", name), namespace)
-        present = ast.Assign(targets=[ast_subscript_store("d", f.name)], value=value_expr)
+        present = ast.Assign(targets=[ast_subscript_store("d", f.name)], value=value_expr, **POSITION)
         if f.name in cond_names:
             default_node = ast_bind(namespace, "_default", f.default)
-            absent = ast.Assign(targets=[ast_subscript_store("d", f.name)], value=default_node)
+            absent = ast.Assign(targets=[ast_subscript_store("d", f.name)], value=default_node, **POSITION)
             body.append(
                 ast.If(
                     test=ast.Compare(
-                        left=ast.Constant(value=f.name), ops=[ast.In()], comparators=[ast_load("mapping")]
+                        left=ast.Constant(value=f.name, **POSITION),
+                        ops=[ast.In()],
+                        comparators=[ast_load("mapping")],
+                        **POSITION,
                     ),
                     body=[present],
                     orelse=[absent],
+                    **POSITION,
                 )
             )
         else:
             body.append(present)
-    body.append(ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("d")))
-    body.append(ast.Return(value=ast_load("self")))
-    return ast_function("from_mapping", args, body, namespace)
+    body.append(ast.Assign(targets=[ast_self_dict(ast.Store())], value=ast_load("d"), **POSITION))
+    body.append(ast.Return(value=ast_load("self"), **POSITION))
+    return ast_function("from_mapping", args, body)
 
 
 def ensure_resolved(cls):
@@ -677,9 +752,19 @@ def ensure_resolved(cls):
     # one, for this class, skips the wire_fields/Shape interpretive loop
     # entirely -- see the module docstring for why this can't just be
     # inherited from an ancestor.
-    cls.__init__ = compile_init(fields, no_input_names)
-    cls.to_mapping = compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names)
-    cls.from_mapping = staticmethod(compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names))
+    namespace = {}
+    init, to_mapping, from_mapping = compile_functions(
+        cls,
+        [
+            compile_init(fields, no_input_names, namespace),
+            compile_to_mapping(fields, no_input_names, shapes, needs_ctx, cond_names, namespace),
+            compile_from_mapping(cls, fields, shapes, needs_ctx, cond_names, namespace),
+        ],
+        namespace,
+    )
+    cls.__init__ = init
+    cls.to_mapping = to_mapping
+    cls.from_mapping = staticmethod(from_mapping)
 
     return resolved
 

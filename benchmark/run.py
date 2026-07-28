@@ -7,7 +7,7 @@ Workloads:
 * **telemetry(m)** -- a length-framed, mixed-width message with a dynamic
   string and m nested records, each with a dynamic bytes payload.
 
-For each library and size we time pack and unpack, then least-squares fit
+For each library and size we time building the schema, then pack and unpack, then least-squares fit
 ``ns = base + slope * size`` so the per-field / per-item cost (``slope``) and the
 fixed per-call overhead (``base``) are visible -- that is the runtime complexity.
 
@@ -40,6 +40,7 @@ from rich.console import Console
 from rich.table import Table
 
 HERE = pathlib.Path(__file__).parent
+MARKDOWN = False  # --markdown: tables ready to paste into a pull request
 OUT = Console(width=118)  # keep tables readable even when stdout is piped
 LOG = Console(stderr=True)
 
@@ -123,6 +124,88 @@ def run_task(mods, task, sizes, wire_of, checksum_of, unit, measure_fn):
             packs[label][size] = measure_fn(pack)
             unpacks[label][size] = measure_fn(lambda u=unpack, w=wire: u(w))
     return packs, unpacks
+
+
+def run_build(mods, task, sizes, unit, measure_fn):
+    """Time building the schema itself: `struct.Struct(fmt)`, a `construct`
+    object graph, a `ctypes`/dataclass class, `rustruct.compile()`.
+
+    Paid once per schema rather than per message, so it never shows up in
+    the pack/unpack tables -- which is exactly why a change that lands
+    entirely on the compile path can look free there.
+
+    Swept over the size only where the schema itself grows with it, which
+    is `scalars` and its `n` fields; see `run_build_once` for the rest.
+    """
+    LOG.rule(f"[bold]{task} build[/]  ({unit} = {sizes[0]}..{sizes[-1]})")
+    out = {}
+    for label, _ in IMPLEMENTATIONS:
+        mod = mods[label]
+        build = getattr(mod, f"build_{task}", None)
+        if task not in mod.SUPPORTS or build is None:
+            LOG.log(f"[dim]{label}: skips {task} build[/]")
+            continue
+        out[label] = {}
+        for size in sizes:
+            LOG.log(f"{task} build  [cyan]{label}[/]  {unit}={size}")
+            out[label][size] = measure_fn(lambda b=build, sz=size: b(sz))
+    return out
+
+
+def run_build_once(mods, task, size, measure_fn):
+    """The same, for a schema that does not vary with the size.
+
+    An array of `m` items is one schema whatever `m` is, so there is nothing
+    to fit -- a single number per implementation is the whole answer, and a
+    fitted slope over a flat line would be noise reported as a result.
+    """
+    LOG.rule(f"[bold]{task} build[/]")
+    out = {}
+    for label, _ in IMPLEMENTATIONS:
+        mod = mods[label]
+        build = getattr(mod, f"build_{task}", None)
+        if task not in mod.SUPPORTS or build is None:
+            LOG.log(f"[dim]{label}: skips {task} build[/]")
+            continue
+        LOG.log(f"{task} build  [cyan]{label}[/]")
+        out[label] = measure_fn(lambda b=build, sz=size: b(sz))
+    return out
+
+
+def emit(title, columns, rows):
+    """One table, as a `rich` box or as markdown.
+
+    `columns` is `(header, justify)` pairs and `rows` is `(cells, style)`;
+    the style is a `rich` one and markdown drops it.
+    """
+    if MARKDOWN:
+        # Plain print, not the console: no wrapping to a fixed width, and
+        # nothing in a cell read as markup.
+        print(f"**{title}**\n")
+        print("| " + " | ".join(h for h, _ in columns) + " |")
+        print("| " + " | ".join("---:" if j == "right" else "---" for _, j in columns) + " |")
+        for cells, _ in rows:
+            print("| " + " | ".join(cells) + " |")
+        print()
+        return
+    table = Table(title=title, title_justify="left", title_style="bold")
+    for header, justify in columns:
+        table.add_column(header, justify=justify)
+    for cells, style in rows:
+        table.add_row(*cells, style=style)
+    OUT.print(table)
+    OUT.print()
+
+
+def render_build_once(title, data):
+    """One column, because the schema is the same at every size."""
+    baseline = data.get("struct")
+    rows = []
+    for label, ns in sorted(data.items(), key=lambda kv: kv[1]):
+        ratio = f"{ns / baseline:,.2f}x" if baseline else "-"
+        style = "bold cyan" if label == "rustruct" else ("dim" if label == "struct" else "")
+        rows.append(([label, f"{ns:,.0f}", ratio], style))
+    emit(title, [("impl", "left"), ("ns", "right"), ("vs struct", "right")], rows)
 
 
 def make_io_reader(wire):
@@ -228,13 +311,9 @@ def render(title, sizes, data, unit):
     """One table: absolute ns per size, the fitted per-unit cost, that cost
     relative to hand-written struct (1.00x), and the fitted per-call overhead
     (the intercept -- in ns, may dip below zero on fit noise)."""
-    table = Table(title=title, title_justify="left", title_style="bold")
-    table.add_column("impl")
-    for s in sizes:
-        table.add_column(f"{unit}={s}", justify="right")
-    table.add_column(f"ns/{unit}", justify="right", style="bold")
-    table.add_column("vs struct", justify="right")
-    table.add_column("call ns", justify="right", style="dim")
+    columns = [("impl", "left")]
+    columns += [(f"{unit}={s}", "right") for s in sizes]
+    columns += [(f"ns/{unit}", "right"), ("vs struct", "right"), ("call ns", "right")]
 
     def last(row):
         return row.get(sizes[-1], next(iter(row.values())))
@@ -246,57 +325,38 @@ def render(title, sizes, data, unit):
             fits[label] = fit_line([x for x, _ in pts], [y for _, y in pts])
     baseline = fits.get("struct", (None, None))[0]
 
-    order = sorted(fits, key=lambda k: last(data[k]))
-    for label in order:
+    rows = []
+    for label in sorted(fits, key=lambda k: last(data[k])):
         row = data[label]
         slope, base = fits[label]
         cells = [f"{row[s]:,.0f}" if s in row else "-" for s in sizes]
         ratio = f"{max(slope, 0.0) / baseline:,.2f}x" if baseline else "-"
         style = "bold cyan" if label == "rustruct" else ("dim" if label == "struct" else "")
-        table.add_row(label, *cells, f"{slope:,.1f}", ratio, f"{base:,.0f}", style=style)
-    OUT.print(table)
-    OUT.print()
+        rows.append(([label, *cells, f"{slope:,.1f}", ratio, f"{base:,.0f}"], style))
+    emit(title, columns, rows)
 
 
 def render_interop(size, wire_size, read_ns, streamed):
     """Show the isolated read cost and the complete IO decoding pipeline."""
     OUT.print(f"[dim]isolated BytesIO.read({wire_size:,}) allocation: {read_ns:,.0f} ns/op[/]")
-    table = Table(
-        title=f"telemetry: IO[bytes].read + unpack ({size} records, {wire_size:,} B)",
-        title_justify="left",
-        title_style="bold",
-    )
-    table.add_column("impl")
-    table.add_column("IO total", justify="right", style="bold")
-    table.add_column("IO throughput", justify="right")
-
+    rows = []
     for label in sorted(streamed, key=streamed.get):
         total = streamed[label]
         mib_s = wire_size / (total / 1e9) / (1 << 20)
         style = "bold cyan" if label == "rustruct" else ("dim" if label == "struct" else "")
-        table.add_row(
-            label,
-            f"{total:,.0f} ns",
-            f"{mib_s:,.1f} MiB/s",
-            style=style,
-        )
-    OUT.print(table)
-    OUT.print()
+        rows.append(([label, f"{total:,.0f} ns", f"{mib_s:,.1f} MiB/s"], style))
+    emit(
+        f"telemetry: IO[bytes].read + unpack ({size} records, {wire_size:,} B)",
+        [("impl", "left"), ("IO total", "right"), ("IO throughput", "right")],
+        rows,
+    )
 
 
 def render_threadpool(title, data, jobs, chunksize):
-    table = Table(
-        title=f"{title} ({jobs:,} jobs, chunksize={chunksize}; ns/job)",
-        title_justify="left",
-        title_style="bold",
-    )
-    table.add_column("impl")
-    for workers in THREADPOOL_WORKERS:
-        suffix = "s" if workers != 1 else ""
-        table.add_column(f"{workers} worker{suffix}", justify="right")
-    table.add_column("best speedup", justify="right", style="bold")
-    table.add_column("best rate", justify="right")
-
+    columns = [("impl", "left")]
+    columns += [(f"{w} worker{'' if w == 1 else 's'}", "right") for w in THREADPOOL_WORKERS]
+    columns += [("best speedup", "right"), ("best rate", "right")]
+    rows = []
     for label in sorted(data, key=lambda key: min(data[key].values())):
         row = data[label]
         best_workers = min(row, key=row.get)
@@ -304,19 +364,17 @@ def render_threadpool(title, data, jobs, chunksize):
         rate = 1e9 / row[best_workers]
         cells = [f"{row[workers]:,.0f}" for workers in THREADPOOL_WORKERS]
         style = "bold cyan" if label == "rustruct" else ("dim" if label == "struct" else "")
-        table.add_row(
-            label,
-            *cells,
-            f"{speedup:.2f}x @ {best_workers}",
-            f"{rate:,.0f} jobs/s",
-            style=style,
-        )
-    OUT.print(table)
-    OUT.print()
+        rows.append(([label, *cells, f"{speedup:.2f}x @ {best_workers}", f"{rate:,.0f} jobs/s"], style))
+    emit(f"{title} ({jobs:,} jobs, chunksize={chunksize})", columns, rows)
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--markdown",
+        action="store_true",
+        help="print the tables as markdown, ready to paste into a pull request",
+    )
     parser.add_argument(
         "--budget",
         type=float,
@@ -361,7 +419,10 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    global MARKDOWN
+
     args = parse_args(argv)
+    MARKDOWN = args.markdown
     load_module("common", HERE / "common.py")
     common = sys.modules["common"]
     mods = {label: load_module(f"impl_{d}", HERE / d / "impl.py") for label, d in IMPLEMENTATIONS}
@@ -380,13 +441,22 @@ def main(argv=None):
         f"[bold]ns/unit[/] = fitted cost per field/item"
     )
 
+    sb = run_build(mods, "scalars", SCALAR_SIZES, "n", measure_fn)
+    render("scalars: build  (n u16 fields)", SCALAR_SIZES, sb, "n")
+
     sp, su = run_task(mods, "scalars", SCALAR_SIZES, common.scalars_wire, common.scalars_checksum, "n", measure_fn)
     render("scalars: pack   (n u16 fields)", SCALAR_SIZES, sp, "n")
     render("scalars: unpack (n u16 fields)", SCALAR_SIZES, su, "n")
 
+    vb = run_build_once(mods, "vector", VECTOR_SIZES[-1], measure_fn)
+    render_build_once("vector: build  (one schema, any m)", vb)
+
     vp, vu = run_task(mods, "vector", VECTOR_SIZES, common.vector_wire, common.vector_checksum, "m", measure_fn)
     render("vector: pack   (m items)", VECTOR_SIZES, vp, "m")
     render("vector: unpack (m items)", VECTOR_SIZES, vu, "m")
+
+    tb = run_build_once(mods, "telemetry", TELEMETRY_SIZES[-1], measure_fn)
+    render_build_once("telemetry: build  (one schema, any m)", tb)
 
     tp, tu = run_task(
         mods,

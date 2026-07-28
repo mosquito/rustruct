@@ -222,9 +222,12 @@ def test_depth_caps_are_exactly_where_they_claim():
     # how deep a single expression nests (reset per option, so a schema
     # full of 128-deep lengths is fine). Nesting arrays rather than
     # structs, because struct nesting hits the frame check long before.
-    compile(nest_arrays(128))
-    with pytest.raises(SchemaError, match="deeper than 128"):
-        compile(nest_arrays(129))
+    #
+    # The two numbers differ because the levels cost different amounts of
+    # stack: a type level about 3 KB, an expression level about 0.6 KB.
+    compile(nest_arrays(64))
+    with pytest.raises(SchemaError, match="deeper than 64"):
+        compile(nest_arrays(65))
 
     compile((u("b", "bytes", len=nest_expr(128)),))
     with pytest.raises(SchemaError, match="deeper than 128"):
@@ -234,7 +237,7 @@ def test_depth_caps_are_exactly_where_they_claim():
 def test_absurdly_deep_schema_is_rejected_cheaply():
     # The cap has to bite at the cap, not after walking whatever it was
     # handed. A million levels is refused in well under a millisecond
-    # because the parser never descends past 128 -- an implementation that
+    # because the parser never descends past its cap -- an implementation that
     # converted the tuple tree first and checked afterwards would sit here
     # chewing through a million frames instead. Both recursions get a turn.
     deep = nest_structs(1_000_000)

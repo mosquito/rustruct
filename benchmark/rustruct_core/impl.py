@@ -9,10 +9,14 @@ import rustruct
 SUPPORTS = {"scalars", "vector", "telemetry"}
 
 
+def build_scalars(n):
+    fields = tuple((f"f{i}", "u16", {}) for i in range(n))
+    return rustruct.compile(fields, byteorder="network")
+
+
 def make_scalars(n):
     names = [f"f{i}" for i in range(n)]
-    fields = tuple((name, "u16", {}) for name in names)
-    codec = rustruct.compile(fields, byteorder="network")
+    codec = build_scalars(n)
     values = dict(zip(names, common.scalars_values(n), strict=True))
 
     def pack():
@@ -25,7 +29,7 @@ def make_scalars(n):
     return pack, unpack
 
 
-def make_vector(m):
+def build_vector(_m):
     item_fields = (("a", "u16", {}), ("b", "u16", {}))
     fields = (
         ("n", "u16", {}),
@@ -35,7 +39,11 @@ def make_vector(m):
             {"elem": ("struct", {"fields": item_fields}), "count": ("ref", "n")},
         ),
     )
-    codec = rustruct.compile(fields, byteorder="network")
+    return rustruct.compile(fields, byteorder="network")
+
+
+def make_vector(m):
+    codec = build_vector(m)
     items = [{"a": a, "b": b} for a, b in common.vector_items(m)]
     values = {"items": items}
 
@@ -49,7 +57,7 @@ def make_vector(m):
     return pack, unpack
 
 
-def make_telemetry(m):
+def build_telemetry(_m):
     record_fields = (
         ("record_id", "u32", {}),
         ("kind", "u8", {}),
@@ -82,7 +90,11 @@ def make_telemetry(m):
         ("frame_size", "u32", {}),
         ("frame", "struct", {"fields": frame_fields, "size": ("ref", "frame_size")}),
     )
-    codec = rustruct.compile(fields, byteorder="network")
+    return rustruct.compile(fields, byteorder="network")
+
+
+def make_telemetry(m):
+    codec = build_telemetry(m)
     values = {"frame": common.telemetry_values(m)}
 
     def pack():

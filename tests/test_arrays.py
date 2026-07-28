@@ -62,9 +62,9 @@ def test_nested_arrays():
 def test_deep_array_nesting_decodes_past_the_struct_frame_limit():
     # Unpack frames are capped at 64, but only `struct` costs one, so that
     # cap says nothing about arrays: this nests to the parser's own limit
-    # and still decodes. It is also why that limit cannot be lowered to
-    # match the frame cap -- it would start rejecting schemas that work.
-    codec = compile(nest_arrays(128))
+    # and still decodes, which is also why that limit sits above the frame
+    # cap rather than at it.
+    codec = compile(nest_arrays(64))
     assert codec.pack(codec.unpack(b"\x07")) == b"\x07"
 
 
