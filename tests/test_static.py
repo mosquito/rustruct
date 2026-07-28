@@ -245,10 +245,17 @@ def test_absurdly_deep_schema_is_rejected_cheaply():
 
 
 def test_deep_schema_limit_is_above_anything_usable():
-    # Unpacking caps frames at 64, and a nested struct is what costs one,
-    # so struct nesting past that fails every decode -- the parser's own
-    # limit has to sit above it, never below, or a schema the decoder
-    # handles would not even compile.
+    # Two different limits, and neither number here is the parser's 128:
+    # both schemas below compile fine. Unpacking caps live frames at 64
+    # (MAX_DEPTH, program.rs), and a struct is what costs one -- including
+    # the schema itself, which is the top frame. So 63 levels of nesting
+    # is the last that decodes and 64 is one too many, which is why these
+    # numbers look off by one against the cap they are testing.
+    #
+    # That is the gap this pins, in the right direction: a too-deep schema
+    # has to get as far as compiling and fail on data. Drop the parser's
+    # limit below 64 and the failure would arrive earlier, at compile
+    # time, as a SchemaError instead.
     #
     # This bounds the parser's limit from below only. It says nothing
     # about other nesting: arrays cost no frame and decode far deeper,
