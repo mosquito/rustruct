@@ -236,6 +236,20 @@ def test_deep_expression_is_rejected_not_a_crash():
         compile((u("b", "bytes", len=nest_expr(20000)),))
 
 
+def test_absurdly_deep_schema_is_rejected_cheaply():
+    # The cap has to bite at the cap, not after walking whatever it was
+    # handed. A million levels is refused in well under a millisecond
+    # because the parser never descends past 128 -- an implementation that
+    # converted the tuple tree first and checked afterwards would sit here
+    # chewing through a million frames instead. Both recursions get a turn.
+    deep = nest_structs(1_000_000)
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(deep)
+    del deep  # ~330 MB; don't hold it while the next one is built
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile((u("b", "bytes", len=nest_expr(1_000_000)),))
+
+
 def test_deep_schema_limit_is_above_anything_usable():
     # Struct nesting is capped at 64 frames when unpacking, so a schema
     # deeper than that already fails every decode -- the parser's own limit
