@@ -30,14 +30,30 @@ use crate::schema_err;
 
 /// How deeply a schema may nest before parsing gives up.
 ///
-/// `parse_type`/`parse_type_spec`/`parse_fields` are mutually recursive over
-/// caller-supplied data, so without a cap a deep enough schema overflows the
-/// C stack and kills the interpreter outright. The core caps struct nesting
-/// at 64 frames when unpacking, so anything past that already fails every
-/// decode; this sits comfortably above it.
-pub const MAX_SCHEMA_DEPTH: usize = 128;
+/// `parse_type`/`parse_type_spec`/`parse_fields` are mutually recursive
+/// over caller-supplied data, so without a cap a deep enough schema
+/// overflows the C stack and kills the interpreter outright -- a SIGSEGV,
+/// with nothing to catch. Nothing else stands between the two: `compile`
+/// checks the frames a schema would need, but only once parsing has
+/// already survived to hand it a program.
+///
+/// The floor is `MAX_DEPTH`: unpacking allows 64 struct frames, and a
+/// schema the decoder can handle has to get as far as compiling. The
+/// ceiling is the stack, which is not the 8 MB of the main thread -- a
+/// thread gets 512 KB by default, where a level of struct nesting costs
+/// about 3 KB and the recursion dies somewhere past 160. At 64 that
+/// leaves room to spare and survives a 256 KB stack; at 128 it did not.
+///
+/// Nothing real nests this far anyway: structs are already capped at 63
+/// by the frame check, and nobody writes an array of arrays of arrays
+/// sixty deep.
+pub const MAX_SCHEMA_DEPTH: usize = 64;
 
 /// The same cap for expression tuples, which nest independently of types.
+///
+/// Left higher because it is far cheaper: an expression level costs about
+/// 0.6 KB against a type level's 3 KB, so 128 of them still fit a stack
+/// this side of tiny.
 const MAX_EXPR_DEPTH: usize = 128;
 
 // ---------- closed sets ----------
