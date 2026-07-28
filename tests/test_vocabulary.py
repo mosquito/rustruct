@@ -1,15 +1,12 @@
-"""Every name in `rustruct.vocab` is one the core actually accepts.
+"""`rustruct.vocab` and the closed sets in Rust say the same thing.
 
-The vocabulary is a hand-written mirror of closed sets that live in Rust
-(`parse_type`, `Algo::preset`, `parse_enc`, the rest-policy match, `BinOp`).
-Nothing mechanically ties the two together, so each member here is fed
-through a real `compile()`: a name that stops being accepted -- or was never
-accepted, i.e. a typo in the mirror -- fails a test instead of surfacing as
-a `SchemaError` in somebody's schema.
-
-The check is one-directional by construction: it proves no member is
-rejected, not that no kind exists in Rust without a member here. Closing
-that direction needs the core to publish its own tables.
+The vocabulary is a hand-written mirror of tables that live in Rust, so it
+is checked from both ends. Outward: every member here is fed through a real
+`compile()`, so a name that stops being accepted -- or was never accepted,
+i.e. a typo in the mirror -- fails a test rather than surfacing as a
+`SchemaError` in somebody's schema. Inward: `core.vocabulary()` publishes
+the Rust tables and the sets are asserted equal, so a name that exists only
+in Rust cannot quietly go unused, the way `crc32c` and `crc64_xz` did.
 """
 
 import pytest
@@ -28,6 +25,18 @@ from rustruct import (
     compile,
 )
 from rustruct.vocab import REST_KEY
+
+
+def accepted_by_rust(name):
+    """Every spelling the core takes for a set, published as a name or not.
+
+    Read at collection time, so the parametrized cases below are whatever
+    Rust currently accepts rather than a list retyped here.
+    """
+    from rustruct.core import vocabulary
+
+    return vocabulary()["accepted"][name]
+
 
 # A minimal schema exercising each kind, keyed by the member it covers.
 # Several kinds are only legal as a struct field or need a companion field,
@@ -104,28 +113,20 @@ def test_every_encoding_compiles(encoding):
     assert codec.unpack(codec.pack({"s": "ok"}))["s"] == "ok"
 
 
-@pytest.mark.parametrize(
-    ("spelling", "expected"),
-    [
-        ("utf-8", Encoding.UTF8),
-        ("UTF-8", Encoding.UTF8),
-        ("utf8", Encoding.UTF8),
-        ("utf_8", Encoding.UTF8),
-        ("ascii", Encoding.ASCII),
-        ("US-ASCII", Encoding.ASCII),
-        ("usascii", Encoding.ASCII),
-        ("latin-1", Encoding.LATIN1),
-        ("latin1", Encoding.LATIN1),
-        ("ISO-8859-1", Encoding.LATIN1),
-        ("iso8859_1", Encoding.LATIN1),
-    ],
-)
-def test_encoding_accepts_every_spelling_the_core_does(spelling, expected):
-    # Encoding._missing_ mirrors parse_enc's normalizer; if the two drift,
-    # the enum would start refusing something compile() still accepts.
-    assert Encoding(spelling) is expected
-    codec = compile((u("n", "u8"), u("s", "str", len=("ref", "n"), encoding=spelling)))
-    assert codec.unpack(codec.pack({"s": "ok"}))["s"] == "ok"
+@pytest.mark.parametrize("spelling", sorted(accepted_by_rust("encodings")))
+def test_encoding_accepts_every_spelling_the_core_does(spelling):
+    # The spellings come from the core rather than being retyped here, so
+    # an alias added or dropped in Rust changes what this runs on. They are
+    # the one set with names that are accepted but not published: an alias
+    # is a way of writing a value, not a value of its own, so it gets no
+    # `Encoding` member.
+    #
+    # `Encoding._missing_` mirrors the core's normalizer. Rather than pin
+    # which member each alias lands on -- a fact the core does not publish
+    # -- assert the core cannot tell the alias from the member's own name.
+    member = Encoding(spelling)
+    both = [compile((u("n", "u8"), u("s", "str", len=("ref", "n"), encoding=e))) for e in (spelling, member.value)]
+    assert both[0]._program_debug() == both[1]._program_debug()
 
 
 def test_encoding_rejects_what_the_core_rejects():
@@ -226,9 +227,10 @@ def test_flags_base_takes_the_unsigned_kinds_and_refuses_the_signed_ones():
 
 
 def rust_vocabulary():
+    """The Rust tables, name lists as sets. Nested maps stay maps."""
     from rustruct.core import vocabulary
 
-    return {k: set(v) for k, v in vocabulary().items()}
+    return {k: v if isinstance(v, dict) else set(v) for k, v in vocabulary().items()}
 
 
 def test_byteorders_match_rust():
@@ -249,6 +251,22 @@ def test_encodings_match_rust():
     # to the core would otherwise stay invisible here, exactly the way
     # crc32c and crc64_xz did before they were named.
     assert {e.value for e in Encoding} == rust_vocabulary()["encodings"]
+
+
+def test_algos_match_rust():
+    # The set this check was written for: both crc32c and crc64_xz were
+    # implemented, reachable, and named nowhere a Python reader would look.
+    assert {a.value for a in Algo} == rust_vocabulary()["algos"]
+
+
+def test_rest_policies_match_rust():
+    assert {r.value for r in RestPolicy} == rust_vocabulary()["rest_policies"]
+
+
+def test_kinds_match_rust():
+    # Kinds are published as the keys of `options` rather than a list of
+    # their own -- every kind has an option table, even an empty one.
+    assert {k.value for k in Kind} == set(rust_vocabulary()["options"])
 
 
 def test_errors_policy_is_still_the_single_one():

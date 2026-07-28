@@ -4,8 +4,8 @@ use crate::digest::Algo;
 use crate::error::{SRes, SchemaError};
 use crate::expr::{Expr, Ins, EXPR_STACK};
 use crate::program::{
-    BitItem, Common, CountSrc, Enc, FixKind, FixedItem, FlagItem, Inv, Key, LenSrc, Op, Over,
-    Program, Reg, RestPolicy, MAX_DEPTH, MAX_REGS, MAX_SPANS,
+    BitItem, Common, CountSrc, Enc, Encodings, FixKind, FixedItem, FlagItem, Inv, Key, LenSrc, Op,
+    Over, Program, Reg, RestPolicies, MAX_DEPTH, MAX_REGS, MAX_SPANS,
 };
 use crate::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
 
@@ -555,12 +555,7 @@ impl C<'_> {
                         is_bool: mask.count_ones() == 1,
                     });
                 }
-                let rest = match rest.as_str() {
-                    "keep" => RestPolicy::Keep,
-                    "strict" => RestPolicy::Strict,
-                    "ignore" => RestPolicy::Ignore,
-                    other => return Err(err(format!("flags: unknown rest policy {other:?}"))),
-                };
+                let rest = RestPolicies::parse(rest.as_str()).map_err(err)?;
                 let op = Op::Flags {
                     prim: *base,
                     be,
@@ -959,50 +954,13 @@ fn named_only(name: Option<Arc<str>>, what: &str) -> SRes<Arc<str>> {
     })
 }
 
-/// The encodings, as one table: the canonical spelling `Enc::ALL`
-/// publishes and the normalized forms `parse_enc` matches come out of the
-/// same declaration, so one cannot gain a spelling the other has never
-/// heard of.
-///
-/// The bracketed names are matched *after* normalization -- lowercased with
-/// `-` and `_` removed -- which is why they are written without separators
-/// and why the canonical name is listed separately rather than reused.
-macro_rules! encodings {
-    ($($variant:path => $canon:literal [$($norm:literal),+ $(,)?]),+ $(,)?) => {
-        impl Enc {
-            /// The canonical spelling of each encoding: what `vocabulary()`
-            /// publishes, and what `rustruct.Encoding`'s members are.
-            pub const ALL: &'static [&'static str] = &[$($canon),+];
-        }
-
-        fn enc_from_normalized(norm: &str) -> Option<Enc> {
-            match norm {
-                $($($norm)|+ => Some($variant),)+
-                _ => None,
-            }
-        }
-    };
-}
-
-encodings! {
-    Enc::Utf8 => "utf-8" ["utf8"],
-    Enc::Ascii => "ascii" ["ascii", "usascii"],
-    Enc::Latin1 => "latin-1" ["latin1", "iso88591"],
-}
-
 fn parse_enc(encoding: &str, errors: &str) -> SRes<Enc> {
     if errors != "strict" {
         return Err(err(format!(
             "errors={errors:?} is not supported by the v1 core (only \"strict\")"
         )));
     }
-    let norm = encoding.to_ascii_lowercase().replace(['-', '_'], "");
-    enc_from_normalized(&norm).ok_or_else(|| {
-        err(format!(
-            "encoding {encoding:?} is not supported by the v1 core ({})",
-            Enc::ALL.join("/")
-        ))
-    })
+    Encodings::parse(encoding).map_err(err)
 }
 
 fn parse_algo(name: &str, ov: &CrcOverrides) -> SRes<Algo> {

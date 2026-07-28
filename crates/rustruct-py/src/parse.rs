@@ -42,32 +42,7 @@ const MAX_EXPR_DEPTH: usize = 128;
 
 // ---------- closed sets ----------
 
-/// A set of strings the core recognises, as one table. `ALL` (what
-/// `vocabulary()` publishes) and the `parse` match come out of it together,
-/// so a spelling cannot be accepted without being published, or the reverse.
-///
-/// The first spelling of a value is canonical; any further ones are aliases.
-macro_rules! closed_set {
-    ($name:ident, $ty:ty, $what:literal, $accepted:literal,
-     [$($val:path => $canon:literal $(| $alias:literal)*),+ $(,)?]) => {
-        pub struct $name;
-
-        impl $name {
-            /// Every spelling this set accepts -- the same table `parse`
-            /// matches on.
-            pub const ALL: &'static [&'static str] = &[$($canon $(, $alias)*),+];
-
-            pub fn parse(s: &str) -> PyResult<$ty> {
-                match s {
-                    $($canon $(| $alias)* => Ok($val),)+
-                    other => Err(schema_err(format!(
-                        "{} {other:?} is not supported ({})", $what, $accepted
-                    ))),
-                }
-            }
-        }
-    };
-}
+use rustruct_core::closed_set;
 
 closed_set!(
     Bo,
@@ -76,8 +51,10 @@ closed_set!(
     "only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes \
      the wire format depend on the running machine",
     [
-        // `network` is a struct-module-style alias for format `!`, i.e. big.
-        ByteOrder::Big => "big" | "network",
+        ByteOrder::Big => "big",
+        // A struct-module-style spelling of `!`, i.e. big -- an entry of its
+        // own rather than an alias, because it is published as a member.
+        ByteOrder::Big => "network",
         ByteOrder::Little => "little",
     ]
 );
@@ -296,11 +273,11 @@ simple!(p_bytes, Vec<u8>, "bytes");
 simple!(p_string, String, "a str");
 
 fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ByteOrder> {
-    Bo::parse(&p_string(v, kind, key, _ctx)?)
+    Bo::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
 }
 
 fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<IntPrim> {
-    Prim::parse(&p_string(v, kind, key, _ctx)?)
+    Prim::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
 }
 
 /// Rejected here rather than at compile time, so the message names the
@@ -371,7 +348,7 @@ fn expr(v: &Bound<'_, PyAny>, what: &str, depth: usize) -> PyResult<ExprIn> {
         )));
     }
     Ok(ExprIn::Bin(
-        Op::parse(&head)?,
+        Op::parse(&head).map_err(schema_err)?,
         Box::new(expr(&t.get_item(1)?, what, depth + 1)?),
         Box::new(expr(&t.get_item(2)?, what, depth + 1)?),
     ))
@@ -539,7 +516,7 @@ kinds! {
     ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"] {
         byteorder: opt p_byteorder,
         r#const:   opt p_i128,
-    } => TypeIn::Int { prim: Prim::parse(kind)?, byteorder, const_: r#const };
+    } => TypeIn::Int { prim: Prim::parse(kind).map_err(schema_err)?, byteorder, const_: r#const };
 
     ["f32", "f64"] {
         byteorder: opt p_byteorder,
@@ -721,15 +698,31 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
 /// exists only in Rust stays invisible to Python and simply goes unused.
 #[pyfunction]
 pub fn vocabulary(py: Python<'_>) -> PyResult<crate::Vocabulary> {
+    use rustruct_core::digest::Algos;
     use rustruct_core::error::Kind as ErrKind;
-    use rustruct_core::program::Enc;
+    use rustruct_core::program::{Encodings, RestPolicies};
 
     let d = PyDict::new(py);
     d.set_item("byteorders", Bo::ALL)?;
     d.set_item("int_prims", Prim::ALL)?;
     d.set_item("binops", Op::ALL)?;
     d.set_item("error_kinds", ErrKind::ALL)?;
-    d.set_item("encodings", Enc::ALL)?;
+    d.set_item("encodings", Encodings::ALL)?;
+    d.set_item("algos", Algos::ALL)?;
+    d.set_item("rest_policies", RestPolicies::ALL)?;
+
+    // Spellings a set takes without publishing as a name of its own -- for
+    // most sets the same list, for encodings the aliases too. Published so
+    // the alias coverage in `tests/test_vocabulary.py` is read off the core
+    // rather than retyped.
+    let accepted = PyDict::new(py);
+    accepted.set_item("byteorders", Bo::ACCEPTED)?;
+    accepted.set_item("int_prims", Prim::ACCEPTED)?;
+    accepted.set_item("binops", Op::ACCEPTED)?;
+    accepted.set_item("encodings", Encodings::ACCEPTED)?;
+    accepted.set_item("algos", Algos::ACCEPTED)?;
+    accepted.set_item("rest_policies", RestPolicies::ACCEPTED)?;
+    d.set_item("accepted", accepted)?;
 
     let options = PyDict::new(py);
     for (kinds, opts) in OPTIONS {

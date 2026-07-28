@@ -881,7 +881,7 @@ fn compile(
 ) -> PyResult<Codec> {
     let parsed = parse::parse_fields(&fields.0, &parse::Ctx::root())?;
     let opts = Options {
-        byteorder: parse::Bo::parse(byteorder)?,
+        byteorder: parse::Bo::parse(byteorder).map_err(schema_err)?,
         max_default,
         max_count,
     };

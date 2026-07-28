@@ -105,12 +105,37 @@ pub enum Enc {
     Latin1,
 }
 
+crate::closed_set!(
+    /// Text encodings a `str`/`cstr` field can use.
+    ///
+    /// Spellings are compared with separators removed and case folded, so
+    /// `"UTF-8"`, `"utf8"` and `"utf_8"` all land on the same member --
+    /// which is why the aliases below are written the way a person would.
+    Encodings, Enc, "encoding", "utf-8/ascii/latin-1",
+    normalize = |s: &str| s.to_ascii_lowercase().replace(['-', '_'], ""),
+    [
+        Enc::Utf8 => "utf-8",
+        Enc::Ascii => "ascii" | "us-ascii",
+        Enc::Latin1 => "latin-1" | "iso-8859-1",
+    ]
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestPolicy {
     Keep,
     Strict,
     Ignore,
 }
+
+crate::closed_set!(
+    /// What a `flags` field does with bits no name in it covers.
+    RestPolicies, RestPolicy, "rest policy", "keep/strict/ignore",
+    [
+        RestPolicy::Keep => "keep",
+        RestPolicy::Strict => "strict",
+        RestPolicy::Ignore => "ignore",
+    ]
+);
 
 /// Inversion of the linear expression `value = a*x + b`: during
 /// pack the derived register `reg` receives `x = (value - b) / a`.
