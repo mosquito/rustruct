@@ -9,14 +9,12 @@ a metaclass that lazily compiles a Codec per class and converts to/from
 typed instances.
 """
 
-from rustruct.core import (
-    Codec,
-    Incomplete,
+from rustruct.core import Codec, Incomplete, compile
+from rustruct.errors import (
     InvalidDataError,
     PackError,
     RustructError,
     SchemaError,
-    compile,
 )
 from rustruct.fields import (
     MISSING,

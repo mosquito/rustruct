@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyNotImplementedError, PyTypeError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError};
+use pyo3::import_exception;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
@@ -50,20 +50,17 @@ impl std::hash::Hasher for FnvHasher {
 type FnvBuildHasher = std::hash::BuildHasherDefault<FnvHasher>;
 type KeyCache = HashMap<Arc<str>, Py<PyString>, FnvBuildHasher>;
 
-create_exception!(rustruct, RustructError, PyException, "Base rustruct error.");
-create_exception!(rustruct, SchemaError, RustructError, "compile() error.");
-create_exception!(
-    rustruct,
-    InvalidDataError,
-    RustructError,
-    "Corrupt data (unpack)."
-);
-create_exception!(
-    rustruct,
-    PackError,
-    RustructError,
-    "Values don't fit the schema (pack)."
-);
+// The exceptions are defined in `src/rustruct/errors.py` and imported here
+// as native Rust types, which is what pyo3 documents for "using exceptions
+// defined in Python code". They are not `create_exception!`d here because
+// pyo3 emits no introspection data for those, so a module exporting one
+// gets a `def __getattr__(name: str) -> Incomplete: ...` fallback in its
+// stub -- which makes a type checker accept any attribute of
+// `rustruct.core`. Subclassing `PyException` from Rust instead is not an
+// option either: that needs the non-limited API, and this ships abi3.
+import_exception!(rustruct.errors, SchemaError);
+import_exception!(rustruct.errors, InvalidDataError);
+import_exception!(rustruct.errors, PackError);
 
 /// Bumped on any change to the IR or the serialization format.
 const ABI: u32 = 1;
@@ -529,10 +526,6 @@ fn collect_op_keys(py: Python<'_>, op: &Op, cache: &mut KeyCache) {
 mod hint {
     use pyo3::inspect::PyStaticExpr as E;
 
-    pub const ANY: E = E::Attribute {
-        value: &E::Name { id: "typing" },
-        attr: "Any",
-    };
     pub const STR: E = E::Name { id: "str" };
     pub const BUFFER: E = E::Attribute {
         value: &E::Name {
@@ -540,8 +533,12 @@ mod hint {
         },
         attr: "Buffer",
     };
-    pub const INT: E = E::Name { id: "int" };
     pub const BYTES: E = E::Name { id: "bytes" };
+    pub const ANY: E = E::Attribute {
+        value: &E::Name { id: "typing" },
+        attr: "Any",
+    };
+    pub const INT: E = E::Name { id: "int" };
     pub const DICT_STR_ANY: E = E::Subscript {
         value: &E::Name { id: "dict" },
         slice: &E::Tuple { elts: &[STR, ANY] },
@@ -896,9 +893,6 @@ fn compile(
 mod core_module {
     #[pymodule_export]
     use super::{compile, Codec, Incomplete};
-
-    #[pymodule_export]
-    use super::{InvalidDataError, PackError, RustructError, SchemaError};
 
     /// Bumped on any change to the IR or the serialization format.
     #[pymodule_export]

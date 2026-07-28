@@ -9,7 +9,6 @@ this form is introspectable: pyo3 emits the member list at compile
 time, and it cannot know what a function body adds.
 """
 
-from _typeshed import Incomplete as Incomplete2
 from collections.abc import Iterable, Mapping
 from typing import Any, Final, final
 from typing_extensions import Buffer
@@ -93,5 +92,3 @@ def vocabulary() -> dict[str, list[str]]:
     can prove that every name Python knows is accepted, but a name that
     exists only in Rust stays invisible to Python and simply goes unused.
     """
-
-def __getattr__(name: str) -> Incomplete2: ...

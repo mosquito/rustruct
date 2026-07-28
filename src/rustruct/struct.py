@@ -24,8 +24,8 @@ import typing
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
-from .core import SchemaError
 from .core import compile as compile_codec
+from .errors import SchemaError
 from .fields import MISSING, FieldSpec, Registry
 from .scalars import ScalarType
 from .vocab import ByteOrder, KindArg

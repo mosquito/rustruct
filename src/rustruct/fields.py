@@ -8,7 +8,7 @@ a descriptor is only required for kinds the annotation alone can't express
 
 from types import MappingProxyType
 
-from .core import SchemaError
+from .errors import SchemaError
 from .expr import resolve_expr_arg
 from .vocab import Algo, Encoding, Kind
 
