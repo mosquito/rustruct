@@ -13,21 +13,23 @@ substitute -- it formats as ``X.U8`` in an f-string while still comparing
 equal to ``"u8"``, so it would corrupt interpolated output while every
 equality test kept passing.
 
-Most of them list only member *names*; ``StrEnum`` derives each value from
-its name via ``_generate_next_value_``, which is ``name.lower()`` -- exactly
-the wire spelling for every set here except :class:`Encoding`. So those wire
-strings are computed, not retyped, and a typo in one is unrepresentable
-rather than merely untested. The two written-out classes are the ones that
-cannot use it: :class:`Encoding`, whose values are not ``name.lower()``, and
-:class:`ErrorKind`, whose per-member docstrings the functional form cannot
-express.
+Every value is written out rather than left to ``enum.auto()``, even where
+``StrEnum`` would derive exactly the right one from the member name. The
+wire spelling is the whole point of these classes, so it belongs next to
+the name where it can be read -- ``CRC16_CCITT = "crc16_ccitt"`` says what
+goes over the wire, ``CRC16_CCITT = auto()`` makes you know the rule to
+find out. :class:`Encoding` could not use ``auto()`` anyway.
 
-The name lists have to stay *literals*, though. ``ty`` reads a spelled-out
-list and types ``Kind.U8`` as ``Literal[Kind.U8]``; build the same list at
-runtime from :func:`rustruct.core.vocabulary` and every member degrades to
-``Unknown``, so even ``Kind.NOSUCH`` stops being an error. The check that
-these lists match Rust's own tables lives in ``tests/test_vocabulary.py``,
-which asserts each enum equals what ``vocabulary()`` publishes.
+Members have to be spelled out in a class body, not built at runtime.
+``ty`` reads a written-out member and types ``Kind.U8`` as
+``Literal[Kind.U8]``; generate the same class from
+:func:`rustruct.core.vocabulary` instead and every member degrades to
+``Unknown``, so even ``Kind.NOSUCH`` stops being an error.
+
+Neither the names nor the values are trusted to stay in step with the core
+on their own: ``tests/test_vocabulary.py`` asserts each enum equals what
+``vocabulary()`` publishes, so a typo on either side fails a test rather
+than reaching a schema.
 
 This module imports nothing from the rest of the package, so it can be used
 from anywhere in it without an import cycle.
