@@ -185,6 +185,11 @@ fn run_struct<B: Builder>(
     pos: usize,
     limit: usize,
 ) -> URes<(B::Val, usize)> {
+    // A compiled schema can no longer reach this: `compile` measures the
+    // frames a program needs and refuses one that would not fit, so the
+    // deepest it hands out is exactly MAX_DEPTH. It stays for programs
+    // that arrive without being compiled here -- `Codec::from_bytes` --
+    // where the depth is whatever the bytes say it is.
     if ctx.frames.len() >= MAX_DEPTH {
         return Err(UFail::invalid(Kind::Depth, pos));
     }

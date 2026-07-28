@@ -8,9 +8,37 @@ a descriptor is only required for kinds the annotation alone can't express
 
 from types import MappingProxyType
 
+from .errors import SchemaError
 from .expr import resolve_expr_arg
+from .vocab import Algo, Encoding, Kind
 
 MISSING = object()
+
+
+def resolve_encoding(encoding):
+    """Normalize an encoding name to an `Encoding` member.
+
+    Accepts every spelling the core accepts (it applies the same lowercase/
+    strip-separators pass), so this only ever narrows *how* a name is
+    written, never which names work. Anything the core would refuse is
+    refused here instead -- at the class body that wrote it, naming the
+    field's own descriptor, rather than at the first pack()."""
+    try:
+        return Encoding(encoding)
+    except ValueError:
+        supported = ", ".join(repr(str(e)) for e in Encoding)
+        raise SchemaError(f"encoding {encoding!r} is not supported (only {supported})") from None
+
+
+def resolve_algo(algo):
+    """Normalize a digest algorithm name to an `Algo` member, raising here
+    rather than leaving it for compile() -- where the message can't say
+    which field it came from."""
+    try:
+        return Algo(algo)
+    except ValueError:
+        supported = ", ".join(repr(str(a)) for a in Algo)
+        raise SchemaError(f"digest algorithm {algo!r} is not supported (only {supported})") from None
 
 
 class FieldSpec:
@@ -58,6 +86,10 @@ def convert(base, *, decode, encode, default=MISSING, default_factory=MISSING, h
         assert Endpoint(address=addr).pack() == bytes.fromhex("c0000201")
     """
     opts = {"base": base, "decode": decode, "encode": encode}
+    # Deliberately a plain string and not a Kind member: "convert" is a
+    # Python-only pseudo-kind that resolve_field_spec unwraps into its base's
+    # kind, so it never reaches the core and has no business in the closed
+    # set the core actually recognises.
     return FieldSpec(kind="convert", opts=opts, default=default, default_factory=default_factory, help=help)
 
 
@@ -76,7 +108,7 @@ def raw(length, *, const=None, default=MISSING, help=None):
     opts = {"len": length}
     if const is not None:
         opts["const"] = const
-    return FieldSpec(kind="raw", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.RAW, opts=opts, default=default, help=help)
 
 
 def slice(len=None, *, max=None, default=MISSING, help=None):  # noqa: A002
@@ -90,19 +122,19 @@ def slice(len=None, *, max=None, default=MISSING, help=None):  # noqa: A002
         opts["len"] = resolve_expr_arg(len)
     if max is not None:
         opts["max"] = max
-    return FieldSpec(kind="bytes", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.BYTES, opts=opts, default=default, help=help)
 
 
 def string(len=None, *, max=None, encoding="utf-8", errors="strict", default=MISSING, help=None):  # noqa: A002
     """A runtime-sized `str` value: the same length rules as `slice()`, but
     the wire bytes are decoded to text on unpack and encoded on pack.
     `len` and `max` count encoded bytes, not Unicode code points."""
-    opts = {"encoding": encoding, "errors": errors}
+    opts = {"encoding": resolve_encoding(encoding), "errors": errors}
     if len is not None:
         opts["len"] = resolve_expr_arg(len)
     if max is not None:
         opts["max"] = max
-    return FieldSpec(kind="str", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.STR, opts=opts, default=default, help=help)
 
 
 def cstring(*, max=None, encoding="utf-8", errors="strict", default=MISSING, help=None):
@@ -110,10 +142,10 @@ def cstring(*, max=None, encoding="utf-8", errors="strict", default=MISSING, hel
     `\\x00` byte on unpack, and pack writes one after the encoded text.
     Always give `max` when reading untrusted input -- it's the only thing
     stopping a missing terminator from consuming the rest of the buffer."""
-    opts = {"encoding": encoding, "errors": errors}
+    opts = {"encoding": resolve_encoding(encoding), "errors": errors}
     if max is not None:
         opts["max"] = max
-    return FieldSpec(kind="cstr", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.CSTR, opts=opts, default=default, help=help)
 
 
 def sized(struct_cls, size, *, default_factory=MISSING, help=None):
@@ -122,19 +154,16 @@ def sized(struct_cls, size, *, default_factory=MISSING, help=None):
     Struct-subclass annotation whenever the outer schema needs TLV-style
     framing (a length field bounding the body)."""
     opts = {"struct": struct_cls, "size": resolve_expr_arg(size)}
-    return FieldSpec(kind="struct", opts=opts, default_factory=default_factory, help=help)
+    return FieldSpec(kind=Kind.STRUCT, opts=opts, default_factory=default_factory, help=help)
 
 
-def bits(width, *, signed=False, const=None, default=MISSING, help=None):
+def bits(width, *, signed=False, default=MISSING, help=None):
     """One field inside a run of consecutive bit fields, packed
     most-significant-bit-first into whole bytes. Each run (however many
     `bits()` fields appear back to back) must add up to a whole number of
-    bytes. `signed=True` reads the field as two's-complement; `const=`
-    fixes the value the same way it does for `raw()`."""
+    bytes. `signed=True` reads the field as two's-complement."""
     opts = {"width": width, "signed": signed}
-    if const is not None:
-        opts["const"] = const
-    return FieldSpec(kind="bits", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.BITS, opts=opts, default=default, help=help)
 
 
 def array(elem, *, count=None, until_eof=False, default_factory=list, help=None):
@@ -143,13 +172,16 @@ def array(elem, *, count=None, until_eof=False, default_factory=list, help=None)
     name, or an expression lambda; referencing a sibling by name derives
     that sibling from `len(...)` on pack. `until_eof=True` instead repeats
     until the current region ends, with a partial trailing element treated
-    as invalid rather than dropped."""
+    as invalid rather than dropped. The two are mutually exclusive: giving
+    both is a `TypeError`, not a silently-ignored `count`."""
+    if until_eof and count is not None:
+        raise TypeError("array(): count= and until_eof=True are mutually exclusive; give exactly one")
     opts = {"elem": elem}
     if until_eof:
         opts["until_eof"] = True
     elif count is not None:
         opts["count"] = resolve_expr_arg(count)
-    return FieldSpec(kind="array", opts=opts, default_factory=default_factory, help=help)
+    return FieldSpec(kind=Kind.ARRAY, opts=opts, default_factory=default_factory, help=help)
 
 
 def digest(algo, over, *, verify=True, poly=None, init=None, xorout=None, refin=None, refout=None, help=None):  # noqa: A002
@@ -158,11 +190,11 @@ def digest(algo, over, *, verify=True, poly=None, init=None, xorout=None, refin=
     and written on pack; verified on unpack unless `verify=False`. The
     caller never supplies this field -- pack() always recomputes it and
     ignores whatever's given, the same as a derived length."""
-    opts = {"algo": algo, "over": over, "verify": verify}
+    opts = {"algo": resolve_algo(algo), "over": over, "verify": verify}
     for name, value in (("poly", poly), ("init", init), ("xorout", xorout), ("refin", refin), ("refout", refout)):
         if value is not None:
             opts[name] = value
-    return FieldSpec(kind="digest", opts=opts, help=help)
+    return FieldSpec(kind=Kind.DIGEST, opts=opts, help=help)
 
 
 def when(pred, then, *, default=None, help=None):
@@ -173,7 +205,7 @@ def when(pred, then, *, default=None, help=None):
     zero bytes, not a null -- and absent from the decoded mapping;
     `default` (`None` unless given) is its Python-side value in that case."""
     opts = {"pred": resolve_expr_arg(pred), "then": then}
-    return FieldSpec(kind="cond", opts=opts, default=default, help=help)
+    return FieldSpec(kind=Kind.COND, opts=opts, default=default, help=help)
 
 
 def switch(on, cases, *, default=None, help=None):
@@ -182,7 +214,7 @@ def switch(on, cases, *, default=None, help=None):
     unmatched tags; a common choice is slice(len="*") for a raw,
     round-trippable fallback."""
     opts = {"on": resolve_expr_arg(on), "cases": cases, "default": default}
-    return FieldSpec(kind="switch", opts=opts, help=help)
+    return FieldSpec(kind=Kind.SWITCH, opts=opts, help=help)
 
 
 class Registry:

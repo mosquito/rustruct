@@ -22,38 +22,44 @@ pub enum Algo {
     Sha256,
 }
 
+/// A Rocksoft CRC model with `refin`/`refout` tied together, which is how
+/// every preset below happens to be specified.
+const fn crc(width: u8, poly: u64, init: u64, xorout: u64, refl: bool) -> Algo {
+    Algo::Crc(CrcSpec {
+        width,
+        poly,
+        init,
+        xorout,
+        refin: refl,
+        refout: refl,
+    })
+}
+
+crate::closed_set!(
+    /// Every algorithm `digest(algo=...)` accepts.
+    Algos, Algo, "digest algorithm",
+    "crc16_ccitt/crc16_ibm/crc32/crc32c/crc64_xz/ip/md5/sha1/sha256",
+    [
+        // CRC-16/IBM-3740 (aka CCITT-FALSE)
+        crc(16, 0x1021, 0xFFFF, 0x0000, false) => "crc16_ccitt",
+        // CRC-16/ARC (aka IBM)
+        crc(16, 0x8005, 0x0000, 0x0000, true) => "crc16_ibm",
+        crc(32, 0x04C11DB7, 0xFFFF_FFFF, 0xFFFF_FFFF, true) => "crc32",
+        crc(32, 0x1EDC6F41, 0xFFFF_FFFF, 0xFFFF_FFFF, true) => "crc32c",
+        crc(64, 0x42F0E1EBA9EA3693, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, true)
+            => "crc64_xz",
+        Algo::IpChecksum => "ip",
+        Algo::Md5 => "md5",
+        Algo::Sha1 => "sha1",
+        Algo::Sha256 => "sha256",
+    ]
+);
+
 impl Algo {
+    /// The preset a name stands for. `Algos::parse` with the message
+    /// dropped, kept because every caller here only wants the option.
     pub fn preset(name: &str) -> Option<Algo> {
-        let crc = |width, poly, init, xorout, refl| {
-            Algo::Crc(CrcSpec {
-                width,
-                poly,
-                init,
-                xorout,
-                refin: refl,
-                refout: refl,
-            })
-        };
-        Some(match name {
-            // CRC-16/IBM-3740 (aka CCITT-FALSE)
-            "crc16_ccitt" => crc(16, 0x1021, 0xFFFF, 0x0000, false),
-            // CRC-16/ARC (aka IBM)
-            "crc16_ibm" => crc(16, 0x8005, 0x0000, 0x0000, true),
-            "crc32" => crc(32, 0x04C11DB7, 0xFFFF_FFFF, 0xFFFF_FFFF, true),
-            "crc32c" => crc(32, 0x1EDC6F41, 0xFFFF_FFFF, 0xFFFF_FFFF, true),
-            "crc64_xz" => crc(
-                64,
-                0x42F0E1EBA9EA3693,
-                0xFFFF_FFFF_FFFF_FFFF,
-                0xFFFF_FFFF_FFFF_FFFF,
-                true,
-            ),
-            "ip" => Algo::IpChecksum,
-            "md5" => Algo::Md5,
-            "sha1" => Algo::Sha1,
-            "sha256" => Algo::Sha256,
-            _ => return None,
-        })
+        Algos::parse(name).ok()
     }
 
     pub fn width_bytes(&self) -> usize {

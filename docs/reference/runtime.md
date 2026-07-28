@@ -25,42 +25,14 @@ For mapping-based operation examples, see {doc}`/how-to/compile-mapping-schemas`
 
 ## Errors
 
-`PackError` and `InvalidDataError` set `kind`/`path`/`offset` on the raised
-instance rather than exposing them as class attributes, so they're
-documented by hand below rather than through autodoc introspection.
+`PackError` and `InvalidDataError` carry `kind` and `path`, and
+`InvalidDataError` also carries `offset`.
 
 ```{eval-rst}
 .. autoexception:: rustruct.RustructError
 .. autoexception:: rustruct.SchemaError
-
 .. autoexception:: rustruct.PackError
-
-   .. py:attribute:: kind
-      :type: str
-
-      Machine-readable failure category, e.g. ``"range"`` or
-      ``"inconsistent"``.
-
-   .. py:attribute:: path
-      :type: str
-
-      Dotted field path where the failure occurred.
-
+   :members:
 .. autoexception:: rustruct.InvalidDataError
-
-   .. py:attribute:: kind
-      :type: str
-
-      Machine-readable failure category, e.g. ``"checksum"`` or
-      ``"tag"``.
-
-   .. py:attribute:: path
-      :type: str
-
-      Dotted field path where the failure occurred.
-
-   .. py:attribute:: offset
-      :type: int
-
-      Byte offset in the input where the failure was detected.
+   :members:
 ```

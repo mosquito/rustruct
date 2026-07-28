@@ -2,7 +2,7 @@
 
 import pytest
 
-from helpers import u
+from helpers import nest_arrays, nest_expr, nest_structs, u
 from rustruct import Codec, InvalidDataError, PackError, SchemaError, compile
 
 
@@ -181,6 +181,85 @@ def test_schema_errors():
         compile((u("x", "wat"),))  # unknown kind
 
 
+def test_deep_schema_is_rejected_not_a_crash():
+    # parse_type/parse_type_spec/parse_fields are mutually recursive over
+    # caller-supplied data, so an unbounded schema used to overflow the C
+    # stack and kill the interpreter outright (SIGSEGV, nothing to catch).
+    compile(nest_structs(63))  # comfortably inside the limit
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(nest_structs(4000))
+
+
+def test_deep_array_nesting_is_rejected_not_a_crash():
+    # A nested `elem` recurses through the type spec, not through a field
+    # list the way struct-in-struct does -- a separate way down into the
+    # same parser, so it needs its own proof that the cap is on the path.
+    # Uncapped this one survives further than struct nesting does: it took
+    # ~5k levels to segfault on a default 8 MB stack, hence 8000 here.
+    compile(nest_arrays(60))
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(nest_arrays(8000))
+
+
+def test_deep_expression_is_rejected_not_a_crash():
+    # Expressions recurse on a counter of their own, reset per option, so
+    # the schema cap says nothing about them: uncapped, one flat field with
+    # a deep enough `len` segfaults on its own (~12k levels on a default
+    # 8 MB stack, hence 20000 here).
+    codec = compile((u("b", "bytes", len=nest_expr(60)),))
+    assert codec.unpack(b"\x07") == {"b": b"\x07"}
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile((u("b", "bytes", len=nest_expr(20000)),))
+
+
+def test_depth_caps_are_exactly_where_they_claim():
+    # Everything else about depth is tested thousands of levels past the
+    # cap, so raising it tenfold would leave all of it green. The number
+    # is the whole safety margin against a stack overflow, so it gets a
+    # test that fails the moment it moves.
+    #
+    # Two caps, counted separately: one for how deep types nest, one for
+    # how deep a single expression nests (reset per option, so a schema
+    # full of 128-deep lengths is fine). Nesting arrays rather than
+    # structs, because struct nesting hits the frame check long before.
+    compile(nest_arrays(128))
+    with pytest.raises(SchemaError, match="deeper than 128"):
+        compile(nest_arrays(129))
+
+    compile((u("b", "bytes", len=nest_expr(128)),))
+    with pytest.raises(SchemaError, match="deeper than 128"):
+        compile((u("b", "bytes", len=nest_expr(129)),))
+
+
+def test_absurdly_deep_schema_is_rejected_cheaply():
+    # The cap has to bite at the cap, not after walking whatever it was
+    # handed. A million levels is refused in well under a millisecond
+    # because the parser never descends past 128 -- an implementation that
+    # converted the tuple tree first and checked afterwards would sit here
+    # chewing through a million frames instead. Both recursions get a turn.
+    deep = nest_structs(1_000_000)
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(deep)
+    del deep  # ~330 MB; don't hold it while the next one is built
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile((u("b", "bytes", len=nest_expr(1_000_000)),))
+
+
+def test_struct_nesting_too_deep_to_decode_is_refused_at_compile():
+    # Unpacking allows 64 live frames and a struct costs one -- including
+    # the schema itself, which is the outermost frame. So 63 levels of
+    # nesting is the last that decodes, and the 64th is one too many,
+    # which is why these numbers look off by one against the cap.
+    #
+    # Such a schema used to compile, and even pack, and fail only on the
+    # first unpack -- so you could build bytes nothing could read back.
+    # Depth is visible in the compiled program, so compile() says it now.
+    codec = compile(nest_structs(63))
+    assert codec.unpack(b"\x01")
+    with pytest.raises(SchemaError, match="structs deep"):
+        compile(nest_structs(64))
+
+
 def test_exception_hierarchy():
     import rustruct
 
@@ -216,3 +295,48 @@ def test_struct_parity_semantics():
     names = ["a", "b", "c", "d", "e", "f", "g", "h"]
     expected = dict(zip(names, pystruct.unpack(">BHIQbhiq", buf), strict=True))
     assert codec.unpack(buf) == expected
+
+
+def test_schema_errors_say_where_they_came_from():
+    # The same complaint at three different depths used to produce three
+    # byte-identical messages, so finding the offending field meant
+    # re-reading the whole schema.
+    def typo_at(fields):
+        with pytest.raises(SchemaError) as excinfo:
+            compile(fields)
+        return str(excinfo.value)
+
+    assert typo_at((u("x", "u8", typo=1),)).endswith("(at x)")
+    assert typo_at((u("frame", "struct", fields=(u("x", "u8", typo=1),)),)).endswith("(at frame.x)")
+    nested = (u("a", "struct", fields=(u("b", "struct", fields=(u("x", "u8", typo=1),)),)),)
+    assert typo_at(nested).endswith("(at a.b.x)")
+
+
+def test_schema_error_paths_name_the_container_that_led_there():
+    def typo_at(fields):
+        with pytest.raises(SchemaError) as excinfo:
+            compile(fields)
+        return str(excinfo.value)
+
+    elem = ("struct", {"fields": (u("x", "u8", typo=1),)})
+    assert typo_at((u("rows", "array", elem=elem, count=1),)).endswith("(at rows[].x)")
+
+    switch_fields = (
+        u("t", "u8"),
+        u("b", "switch", on=("ref", "t"), cases=((7, elem),)),
+    )
+    assert typo_at(switch_fields).endswith("(at b?7.x)")
+
+    default_fields = (
+        u("t", "u8"),
+        u("b", "switch", on=("ref", "t"), cases=((1, ("u8", {})),), default=elem),
+    )
+    assert typo_at(default_fields).endswith("(at b?default.x)")
+
+    assert typo_at(((None, "raw", {"len": 1, "typo": 1}),)).endswith("(at <unnamed>)")
+
+
+def test_schema_error_is_located_once_not_at_every_level():
+    with pytest.raises(SchemaError) as excinfo:
+        compile((u("a", "struct", fields=(u("b", "struct", fields=(u("x", "wat"),)),)),))
+    assert str(excinfo.value).count("(at ") == 1

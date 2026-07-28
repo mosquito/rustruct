@@ -9,14 +9,12 @@ a metaclass that lazily compiles a Codec per class and converts to/from
 typed instances.
 """
 
-from rustruct.core import (
-    Codec,
-    Incomplete,
+from rustruct.core import Codec, Incomplete, compile
+from rustruct.errors import (
     InvalidDataError,
     PackError,
     RustructError,
     SchemaError,
-    compile,
 )
 from rustruct.fields import (
     MISSING,
@@ -37,9 +35,27 @@ from rustruct.fields import (
 )
 from rustruct.scalars import F32, F64, I8, I16, I32, I64, U8, U16, U32, U64, Bool
 from rustruct.struct import Field, Struct
+from rustruct.vocab import (
+    REST_KEY,
+    Algo,
+    BinOp,
+    ByteOrder,
+    Encoding,
+    ErrorKind,
+    Kind,
+    RestPolicy,
+)
 
 __all__ = [
+    "Algo",
+    "BinOp",
+    "ByteOrder",
     "Codec",
+    "Encoding",
+    "ErrorKind",
+    "Kind",
+    "REST_KEY",
+    "RestPolicy",
     "Field",
     "Incomplete",
     "InvalidDataError",

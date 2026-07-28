@@ -1,21 +1,23 @@
 //! pyo3 bindings for the core: the `rustruct.core` module.
 
+mod parse;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use pyo3::buffer::PyBuffer;
-use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyNotImplementedError, PyTypeError};
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError};
+use pyo3::import_exception;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
 };
+use pyo3::Borrowed;
 
 use rustruct_core::compile::{compile as core_compile, Options};
 use rustruct_core::model::{Builder, Source};
 use rustruct_core::pack::{run_with as core_pack, PackOutcome};
-use rustruct_core::program::{IntPrim, Key, Op, Program, RestPolicy};
-use rustruct_core::schema::{BinOp, ByteOrder, CrcOverrides, ExprIn, FieldIn, OverIn, TypeIn};
+use rustruct_core::program::{Key, Op, Program, RestPolicy};
 use rustruct_core::unpack::{run_with as core_unpack, Outcome};
 
 /// FNV-1a: `Codec::key_cache`'s field names are short, fixed at compile
@@ -48,25 +50,22 @@ impl std::hash::Hasher for FnvHasher {
 type FnvBuildHasher = std::hash::BuildHasherDefault<FnvHasher>;
 type KeyCache = HashMap<Arc<str>, Py<PyString>, FnvBuildHasher>;
 
-create_exception!(rustruct, RustructError, PyException, "Base rustruct error.");
-create_exception!(rustruct, SchemaError, RustructError, "compile() error.");
-create_exception!(
-    rustruct,
-    InvalidDataError,
-    RustructError,
-    "Corrupt data (unpack)."
-);
-create_exception!(
-    rustruct,
-    PackError,
-    RustructError,
-    "Values don't fit the schema (pack)."
-);
+// The exceptions are defined in `src/rustruct/errors.py` and imported here
+// as native Rust types, which is what pyo3 documents for "using exceptions
+// defined in Python code". They are not `create_exception!`d here because
+// pyo3 emits no introspection data for those, so a module exporting one
+// gets a `def __getattr__(name: str) -> Incomplete: ...` fallback in its
+// stub -- which makes a type checker accept any attribute of
+// `rustruct.core`. Subclassing `PyException` from Rust instead is not an
+// option either: that needs the non-limited API, and this ships abi3.
+import_exception!(rustruct.errors, SchemaError);
+import_exception!(rustruct.errors, InvalidDataError);
+import_exception!(rustruct.errors, PackError);
 
 /// Bumped on any change to the IR or the serialization format.
 const ABI: u32 = 1;
 
-fn schema_err(msg: impl Into<String>) -> PyErr {
+pub(crate) fn schema_err(msg: impl Into<String>) -> PyErr {
     SchemaError::new_err(msg.into())
 }
 
@@ -95,479 +94,6 @@ fn pack_err(py: Python<'_>, kind: &str, path: &str) -> PyErr {
     let _ = v.setattr("kind", kind);
     let _ = v.setattr("path", path);
     err
-}
-
-// ---------- parsing the input IR ----------
-
-fn parse_byteorder(v: &Bound<'_, PyAny>) -> PyResult<ByteOrder> {
-    let s: String = v
-        .extract()
-        .map_err(|_| schema_err("byteorder must be a str"))?;
-    match s.as_str() {
-        "big" => Ok(ByteOrder::Big),
-        // "network" is a struct-module-style alias for big-endian (format '!').
-        "network" => Ok(ByteOrder::Big),
-        "little" => Ok(ByteOrder::Little),
-        other => Err(schema_err(format!(
-            "byteorder {other:?} is not supported (only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes the wire format depend on the running machine)"
-        ))),
-    }
-}
-
-fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResult<()> {
-    for key in opts.keys() {
-        let k: String = key
-            .extract()
-            .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?;
-        if !allowed.contains(&k.as_str()) {
-            return Err(schema_err(format!("{kind}: unknown option {k:?}")));
-        }
-    }
-    Ok(())
-}
-
-fn get<'py>(opts: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
-    match opts.get_item(key)? {
-        Some(v) if !v.is_none() => Ok(Some(v)),
-        _ => Ok(None),
-    }
-}
-
-fn parse_expr(v: &Bound<'_, PyAny>) -> PyResult<ExprIn> {
-    if let Ok(s) = v.downcast::<PyString>() {
-        let s: String = s.extract()?;
-        if s == "*" {
-            return Ok(ExprIn::Greedy);
-        }
-        return Err(schema_err(format!(
-            "expression: unexpected string {s:?} (only \"*\" is valid)"
-        )));
-    }
-    if v.downcast::<PyInt>().is_ok() {
-        let n: i64 = v
-            .extract()
-            .map_err(|_| schema_err("expression literal does not fit in i64"))?;
-        return Ok(ExprIn::Imm(n));
-    }
-    let t = v
-        .downcast::<PyTuple>()
-        .map_err(|_| schema_err("expression: expected an int, \"*\", or a tuple"))?;
-    if t.len() == 0 {
-        return Err(schema_err("expression: empty tuple"));
-    }
-    let head: String = t
-        .get_item(0)?
-        .extract()
-        .map_err(|_| schema_err("expression: the first tuple element must be a str"))?;
-    if head == "ref" {
-        if t.len() != 2 {
-            return Err(schema_err("(\"ref\", name): exactly two elements"));
-        }
-        let name: String = t
-            .get_item(1)?
-            .extract()
-            .map_err(|_| schema_err("(\"ref\", name): name must be a str"))?;
-        return Ok(ExprIn::Ref(name));
-    }
-    let op = match head.as_str() {
-        "add" => BinOp::Add,
-        "sub" => BinOp::Sub,
-        "mul" => BinOp::Mul,
-        "div" => BinOp::Div,
-        "shl" => BinOp::Shl,
-        "shr" => BinOp::Shr,
-        "and" => BinOp::And,
-        "or" => BinOp::Or,
-        "xor" => BinOp::Xor,
-        "eq" => BinOp::Eq,
-        "ne" => BinOp::Ne,
-        "lt" => BinOp::Lt,
-        "le" => BinOp::Le,
-        "gt" => BinOp::Gt,
-        "ge" => BinOp::Ge,
-        other => {
-            return Err(schema_err(format!(
-                "expression: unknown operation {other:?}"
-            )))
-        }
-    };
-    if t.len() != 3 {
-        return Err(schema_err(format!(
-            "(\"{head}\", a, b): exactly three elements"
-        )));
-    }
-    Ok(ExprIn::Bin(
-        op,
-        Box::new(parse_expr(&t.get_item(1)?)?),
-        Box::new(parse_expr(&t.get_item(2)?)?),
-    ))
-}
-
-fn int_prim(kind: &str) -> Option<IntPrim> {
-    Some(match kind {
-        "u8" => IntPrim::U8,
-        "i8" => IntPrim::I8,
-        "u16" => IntPrim::U16,
-        "i16" => IntPrim::I16,
-        "u32" => IntPrim::U32,
-        "i32" => IntPrim::I32,
-        "u64" => IntPrim::U64,
-        "i64" => IntPrim::I64,
-        _ => return None,
-    })
-}
-
-fn parse_type(kind: &str, opts: &Bound<'_, PyDict>) -> PyResult<TypeIn> {
-    if let Some(prim) = int_prim(kind) {
-        check_keys(opts, &["byteorder", "const"], kind)?;
-        let byteorder = get(opts, "byteorder")?
-            .map(|v| parse_byteorder(&v))
-            .transpose()?;
-        let const_ = get(opts, "const")?
-            .map(|v| {
-                v.extract::<i128>()
-                    .map_err(|_| schema_err(format!("{kind}: const must be an int")))
-            })
-            .transpose()?;
-        return Ok(TypeIn::Int {
-            prim,
-            byteorder,
-            const_,
-        });
-    }
-    Ok(match kind {
-        "f32" | "f64" => {
-            check_keys(opts, &["byteorder"], kind)?;
-            let byteorder = get(opts, "byteorder")?
-                .map(|v| parse_byteorder(&v))
-                .transpose()?;
-            TypeIn::Float {
-                is64: kind == "f64",
-                byteorder,
-            }
-        }
-        "bool" => {
-            check_keys(opts, &["const"], kind)?;
-            let const_ = get(opts, "const")?
-                .map(|v| {
-                    v.extract::<bool>()
-                        .map_err(|_| schema_err("bool: const must be a bool"))
-                })
-                .transpose()?;
-            TypeIn::Bool { const_ }
-        }
-        "raw" => {
-            check_keys(opts, &["len", "const"], kind)?;
-            let len = get(opts, "len")?
-                .map(|v| {
-                    v.extract::<usize>()
-                        .map_err(|_| schema_err("raw: len must be a non-negative int"))
-                })
-                .transpose()?;
-            let const_ = get(opts, "const")?
-                .map(|v| {
-                    v.extract::<Vec<u8>>()
-                        .map_err(|_| schema_err("raw: const must be bytes"))
-                })
-                .transpose()?;
-            TypeIn::Raw { len, const_ }
-        }
-        "bytes" => {
-            check_keys(opts, &["len", "max"], kind)?;
-            let len = get(opts, "len")?.ok_or_else(|| schema_err("bytes: len is required"))?;
-            TypeIn::Bytes {
-                len: parse_expr(&len)?,
-                max: get(opts, "max")?
-                    .map(|v| {
-                        v.extract::<usize>()
-                            .map_err(|_| schema_err("bytes: max must be an int"))
-                    })
-                    .transpose()?,
-            }
-        }
-        "str" => {
-            check_keys(opts, &["len", "max", "encoding", "errors"], kind)?;
-            let len = get(opts, "len")?.ok_or_else(|| schema_err("str: len is required"))?;
-            TypeIn::StrT {
-                len: parse_expr(&len)?,
-                max: get(opts, "max")?
-                    .map(|v| v.extract::<usize>())
-                    .transpose()
-                    .map_err(|_| schema_err("str: max must be an int"))?,
-                encoding: get(opts, "encoding")?
-                    .map(|v| v.extract::<String>())
-                    .transpose()
-                    .map_err(|_| schema_err("str: encoding must be a str"))?
-                    .unwrap_or_else(|| "utf-8".to_string()),
-                errors: get(opts, "errors")?
-                    .map(|v| v.extract::<String>())
-                    .transpose()
-                    .map_err(|_| schema_err("str: errors must be a str"))?
-                    .unwrap_or_else(|| "strict".to_string()),
-            }
-        }
-        "cstr" => {
-            check_keys(opts, &["max", "encoding", "errors"], kind)?;
-            TypeIn::CStrT {
-                max: get(opts, "max")?
-                    .map(|v| v.extract::<usize>())
-                    .transpose()
-                    .map_err(|_| schema_err("cstr: max must be an int"))?,
-                encoding: get(opts, "encoding")?
-                    .map(|v| v.extract::<String>())
-                    .transpose()
-                    .map_err(|_| schema_err("cstr: encoding must be a str"))?
-                    .unwrap_or_else(|| "utf-8".to_string()),
-                errors: get(opts, "errors")?
-                    .map(|v| v.extract::<String>())
-                    .transpose()
-                    .map_err(|_| schema_err("cstr: errors must be a str"))?
-                    .unwrap_or_else(|| "strict".to_string()),
-            }
-        }
-        "bits" => {
-            check_keys(opts, &["width", "signed"], kind)?;
-            let width = get(opts, "width")?
-                .ok_or_else(|| schema_err("bits: width is required"))?
-                .extract::<u8>()
-                .map_err(|_| schema_err("bits: width must be an int in 1..64"))?;
-            let signed = get(opts, "signed")?
-                .map(|v| v.extract::<bool>())
-                .transpose()
-                .map_err(|_| schema_err("bits: signed must be a bool"))?
-                .unwrap_or(false);
-            TypeIn::Bits { width, signed }
-        }
-        "flags" => {
-            check_keys(opts, &["base", "names", "rest", "byteorder"], kind)?;
-            let base_s: String = get(opts, "base")?
-                .ok_or_else(|| schema_err("flags: base is required"))?
-                .extract()
-                .map_err(|_| schema_err("flags: base must be a str (\"u8\"..\"u64\")"))?;
-            let base = int_prim(&base_s).ok_or_else(|| {
-                schema_err(format!("flags: base {base_s:?} is not an integer type"))
-            })?;
-            let names_obj =
-                get(opts, "names")?.ok_or_else(|| schema_err("flags: names is required"))?;
-            let mut names = Vec::new();
-            for pair in names_obj
-                .try_iter()
-                .map_err(|_| schema_err("flags: names must be a sequence of pairs"))?
-            {
-                let (n, mask): (String, u64) = pair?
-                    .extract()
-                    .map_err(|_| schema_err("flags: names entries are (str, int) pairs"))?;
-                names.push((n, mask));
-            }
-            TypeIn::FlagsT {
-                base,
-                byteorder: get(opts, "byteorder")?
-                    .map(|v| parse_byteorder(&v))
-                    .transpose()?,
-                names,
-                rest: get(opts, "rest")?
-                    .map(|v| v.extract::<String>())
-                    .transpose()
-                    .map_err(|_| schema_err("flags: rest must be a str"))?
-                    .unwrap_or_else(|| "keep".to_string()),
-            }
-        }
-        "digest" => {
-            check_keys(
-                opts,
-                &[
-                    "algo", "over", "verify", "poly", "init", "xorout", "refin", "refout",
-                ],
-                kind,
-            )?;
-            let algo: String = get(opts, "algo")?
-                .ok_or_else(|| schema_err("digest: algo is required"))?
-                .extract()
-                .map_err(|_| schema_err("digest: algo must be a str"))?;
-            let over_obj =
-                get(opts, "over")?.ok_or_else(|| schema_err("digest: over is required"))?;
-            let over = if let Ok(s) = over_obj.extract::<String>() {
-                if s == "*" {
-                    OverIn::Star
-                } else {
-                    return Err(schema_err(
-                        "digest: over is either \"*\" or a tuple of names",
-                    ));
-                }
-            } else {
-                let mut names = Vec::new();
-                for n in over_obj
-                    .try_iter()
-                    .map_err(|_| schema_err("digest: over is either \"*\" or a tuple of names"))?
-                {
-                    names.push(
-                        n?.extract::<String>()
-                            .map_err(|_| schema_err("digest: names in over must be str"))?,
-                    );
-                }
-                OverIn::Names(names)
-            };
-            let overrides = CrcOverrides {
-                poly: get(opts, "poly")?
-                    .map(|v| v.extract::<u64>())
-                    .transpose()
-                    .map_err(|_| schema_err("digest: poly must be an int"))?,
-                init: get(opts, "init")?
-                    .map(|v| v.extract::<u64>())
-                    .transpose()
-                    .map_err(|_| schema_err("digest: init must be an int"))?,
-                xorout: get(opts, "xorout")?
-                    .map(|v| v.extract::<u64>())
-                    .transpose()
-                    .map_err(|_| schema_err("digest: xorout must be an int"))?,
-                refin: get(opts, "refin")?
-                    .map(|v| v.extract::<bool>())
-                    .transpose()
-                    .map_err(|_| schema_err("digest: refin must be a bool"))?,
-                refout: get(opts, "refout")?
-                    .map(|v| v.extract::<bool>())
-                    .transpose()
-                    .map_err(|_| schema_err("digest: refout must be a bool"))?,
-            };
-            let verify = get(opts, "verify")?
-                .map(|v| v.extract::<bool>())
-                .transpose()
-                .map_err(|_| schema_err("digest: verify must be a bool"))?
-                .unwrap_or(true);
-            TypeIn::DigestT {
-                algo,
-                overrides,
-                over,
-                verify,
-            }
-        }
-        "struct" => {
-            check_keys(opts, &["fields", "byteorder", "size"], kind)?;
-            let fields_obj =
-                get(opts, "fields")?.ok_or_else(|| schema_err("struct: fields is required"))?;
-            TypeIn::StructT {
-                fields: parse_fields(&fields_obj)?,
-                byteorder: get(opts, "byteorder")?
-                    .map(|v| parse_byteorder(&v))
-                    .transpose()?,
-                size: get(opts, "size")?.map(|v| parse_expr(&v)).transpose()?,
-            }
-        }
-        "array" => {
-            check_keys(opts, &["elem", "count", "until_eof"], kind)?;
-            let elem_obj =
-                get(opts, "elem")?.ok_or_else(|| schema_err("array: elem is required"))?;
-            TypeIn::ArrayT {
-                elem: Box::new(parse_type_spec(&elem_obj)?),
-                count: get(opts, "count")?.map(|v| parse_expr(&v)).transpose()?,
-                until_eof: get(opts, "until_eof")?
-                    .map(|v| v.extract::<bool>())
-                    .transpose()
-                    .map_err(|_| schema_err("array: until_eof must be a bool"))?
-                    .unwrap_or(false),
-            }
-        }
-        "switch" => {
-            check_keys(opts, &["on", "cases", "default"], kind)?;
-            let on = get(opts, "on")?.ok_or_else(|| schema_err("switch: on is required"))?;
-            let cases_obj =
-                get(opts, "cases")?.ok_or_else(|| schema_err("switch: cases is required"))?;
-            let mut cases = Vec::new();
-            for case in cases_obj.try_iter().map_err(|_| {
-                schema_err("switch: cases must be a sequence of (int, (kind, opts)) pairs")
-            })? {
-                let case = case?;
-                let pair = case.downcast::<PyTuple>().map_err(|_| {
-                    schema_err("switch: a cases element must be a (int, (kind, opts)) tuple")
-                })?;
-                if pair.len() != 2 {
-                    return Err(schema_err(
-                        "switch: a cases element must be a (int, (kind, opts)) tuple",
-                    ));
-                }
-                let tag: i64 = pair
-                    .get_item(0)?
-                    .extract()
-                    .map_err(|_| schema_err("switch: a branch tag must be an int (i64)"))?;
-                cases.push((tag, parse_type_spec(&pair.get_item(1)?)?));
-            }
-            TypeIn::SwitchT {
-                on: parse_expr(&on)?,
-                cases,
-                default: get(opts, "default")?
-                    .map(|v| parse_type_spec(&v).map(Box::new))
-                    .transpose()?,
-            }
-        }
-        "cond" => {
-            check_keys(opts, &["pred", "then"], kind)?;
-            let pred = get(opts, "pred")?.ok_or_else(|| schema_err("cond: pred is required"))?;
-            let then = get(opts, "then")?.ok_or_else(|| schema_err("cond: then is required"))?;
-            TypeIn::CondT {
-                pred: parse_expr(&pred)?,
-                then: Box::new(parse_type_spec(&then)?),
-            }
-        }
-        other => return Err(schema_err(format!("unknown kind {other:?}"))),
-    })
-}
-
-/// (kind, opts) — a type in the elem/case/default position.
-fn parse_type_spec(obj: &Bound<'_, PyAny>) -> PyResult<TypeIn> {
-    let t = obj
-        .downcast::<PyTuple>()
-        .map_err(|_| schema_err("a type spec must be a (kind, opts) tuple"))?;
-    if t.len() != 2 {
-        return Err(schema_err("a type spec must be a (kind, opts) tuple"));
-    }
-    let kind: String = t
-        .get_item(0)?
-        .extract()
-        .map_err(|_| schema_err("kind must be a str"))?;
-    let opts_obj = t.get_item(1)?;
-    let opts = opts_obj
-        .downcast::<PyDict>()
-        .map_err(|_| schema_err("opts must be a dict"))?;
-    parse_type(&kind, opts)
-}
-
-fn parse_fields(obj: &Bound<'_, PyAny>) -> PyResult<Vec<FieldIn>> {
-    let mut out = Vec::new();
-    for item in obj
-        .try_iter()
-        .map_err(|_| schema_err("fields must be a tuple of fields"))?
-    {
-        let item = item?;
-        let t = item
-            .downcast::<PyTuple>()
-            .map_err(|_| schema_err("a field must be a (name, kind, opts) tuple"))?;
-        if t.len() != 3 {
-            return Err(schema_err("a field must be a (name, kind, opts) tuple"));
-        }
-        let name_obj = t.get_item(0)?;
-        let name: Option<String> = if name_obj.is_none() {
-            None
-        } else {
-            Some(
-                name_obj
-                    .extract()
-                    .map_err(|_| schema_err("field name must be a str or None"))?,
-            )
-        };
-        let kind: String = t
-            .get_item(1)?
-            .extract()
-            .map_err(|_| schema_err("kind must be a str"))?;
-        let opts_obj = t.get_item(2)?;
-        let opts = opts_obj
-            .downcast::<PyDict>()
-            .map_err(|_| schema_err("opts must be a dict"))?;
-        out.push(FieldIn {
-            name,
-            ty: parse_type(&kind, opts)?,
-        });
-    }
-    Ok(out)
 }
 
 // ---------- unpack: building straight into PyObjects, no Value tree ----------
@@ -716,7 +242,7 @@ impl<'py, 'c> Source for PySource<'py, 'c> {
     type MapView = PyMapView<'py>;
 
     fn map_view(&self, v: &Bound<'py, PyAny>) -> Option<PyMapView<'py>> {
-        if let Ok(d) = v.downcast::<PyDict>() {
+        if let Ok(d) = v.cast::<PyDict>() {
             return Some(PyMapView::Dict(d.clone()));
         }
         // An arbitrary Mapping: same fallback py_to_value always had.
@@ -763,10 +289,10 @@ impl<'py, 'c> Source for PySource<'py, 'c> {
         // showed PyObject_SelfIter/PyIter_Next/Flatten::next as real,
         // avoidable cost once we already know (via the downcast) that
         // this is a concrete list/tuple, not an arbitrary iterable.
-        if let Ok(l) = v.downcast::<PyList>() {
+        if let Ok(l) = v.cast::<PyList>() {
             return Some(l.iter().collect());
         }
-        if let Ok(t) = v.downcast::<PyTuple>() {
+        if let Ok(t) = v.cast::<PyTuple>() {
             return Some(t.iter().collect());
         }
         None
@@ -776,32 +302,32 @@ impl<'py, 'c> Source for PySource<'py, 'c> {
         // PyBool first: bool is a Python int subclass, so downcast::<PyInt>
         // would also match True/False -- checking Bool first (and coercing
         // it to 0/1) matches Value's own Int-accepts-Bool coercion exactly.
-        if let Ok(b) = v.downcast::<PyBool>() {
+        if let Ok(b) = v.cast::<PyBool>() {
             return Some(i128::from(b.is_true()));
         }
-        if v.downcast::<PyInt>().is_ok() {
+        if v.cast::<PyInt>().is_ok() {
             return extract_int(v);
         }
         None
     }
 
     fn as_float(&self, v: &Bound<'py, PyAny>) -> Option<f64> {
-        if let Ok(f) = v.downcast::<PyFloat>() {
+        if let Ok(f) = v.cast::<PyFloat>() {
             return Some(f.value());
         }
         // int-as-float, but deliberately *not* bool-as-float (float_of's
         // existing behavior never coerced Value::Bool either).
-        if v.downcast::<PyInt>().is_ok() && v.downcast::<PyBool>().is_err() {
+        if v.cast::<PyInt>().is_ok() && v.cast::<PyBool>().is_err() {
             return Some(extract_int(v)? as f64);
         }
         None
     }
 
     fn as_bytes(&self, v: &Bound<'py, PyAny>) -> Option<Vec<u8>> {
-        if let Ok(b) = v.downcast::<PyBytes>() {
+        if let Ok(b) = v.cast::<PyBytes>() {
             return Some(b.as_bytes().to_vec());
         }
-        if let Ok(b) = v.downcast::<PyByteArray>() {
+        if let Ok(b) = v.cast::<PyByteArray>() {
             return Some(b.to_vec());
         }
         // buffer protocol (memoryview, mmap, array, ...)
@@ -817,35 +343,35 @@ impl<'py, 'c> Source for PySource<'py, 'c> {
     }
 
     fn as_str(&self, v: &Bound<'py, PyAny>) -> Option<String> {
-        v.downcast::<PyString>().ok().and_then(|s| s.extract().ok())
+        v.cast::<PyString>().ok().and_then(|s| s.extract().ok())
     }
 
     fn truthy(&self, v: &Bound<'py, PyAny>) -> Option<bool> {
-        if let Ok(b) = v.downcast::<PyBool>() {
+        if let Ok(b) = v.cast::<PyBool>() {
             return Some(b.is_true());
         }
-        if let Ok(i) = v.downcast::<PyInt>() {
+        if let Ok(i) = v.cast::<PyInt>() {
             return i.extract::<i128>().ok().map(|x| x != 0);
         }
-        if let Ok(f) = v.downcast::<PyFloat>() {
+        if let Ok(f) = v.cast::<PyFloat>() {
             return Some(f.value() != 0.0);
         }
-        if let Ok(s) = v.downcast::<PyString>() {
+        if let Ok(s) = v.cast::<PyString>() {
             return Some(s.len().unwrap_or(0) != 0);
         }
-        if let Ok(b) = v.downcast::<PyBytes>() {
+        if let Ok(b) = v.cast::<PyBytes>() {
             return Some(!b.as_bytes().is_empty());
         }
-        if let Ok(b) = v.downcast::<PyByteArray>() {
+        if let Ok(b) = v.cast::<PyByteArray>() {
             return Some(b.len() != 0);
         }
-        if let Ok(l) = v.downcast::<PyList>() {
+        if let Ok(l) = v.cast::<PyList>() {
             return Some(l.len() != 0);
         }
-        if let Ok(t) = v.downcast::<PyTuple>() {
+        if let Ok(t) = v.cast::<PyTuple>() {
             return Some(t.len() != 0);
         }
-        if let Ok(d) = v.downcast::<PyDict>() {
+        if let Ok(d) = v.cast::<PyDict>() {
             return Some(d.len() != 0);
         }
         None
@@ -981,6 +507,195 @@ fn collect_op_keys(py: Python<'_>, op: &Op, cache: &mut KeyCache) {
     }
 }
 
+// ---------- Python-level types for the generated stub ----------
+//
+// `Codec`'s arguments and results are `Bound<PyAny>`/`Py<PyAny>`, which is
+// all Rust knows, so the stub would render every one of them as `Any` and
+// poison inference for anything downstream. These newtypes carry nothing at
+// runtime; they exist so `INPUT_TYPE`/`OUTPUT_TYPE` can state the Python
+// type. The `#[pyo3(signature = (x: "..."))]` string form cannot do this:
+// pyo3 stores it as a string constant (see `PyTypeAnnotation::as_type_hint`),
+// so it lands in the stub quoted and with no import for the names it uses.
+//
+// Buffer arguments say `typing_extensions.Buffer`, not pyo3's own
+// `collections.abc.Buffer` (see its `FromPyObject for PyBuffer`): the
+// latter is 3.12+ and this package supports 3.11, where `ty` rejects it.
+// The backport is a stub-only reference -- stubs are never executed and
+// type checkers carry its definition -- so it adds no runtime dependency.
+#[cfg(feature = "experimental-inspect")]
+mod hint {
+    use pyo3::inspect::PyStaticExpr as E;
+
+    pub const STR: E = E::Name { id: "str" };
+    pub const BUFFER: E = E::Attribute {
+        value: &E::Name {
+            id: "typing_extensions",
+        },
+        attr: "Buffer",
+    };
+    pub const BYTES: E = E::Name { id: "bytes" };
+    pub const ANY: E = E::Attribute {
+        value: &E::Name { id: "typing" },
+        attr: "Any",
+    };
+    pub const INT: E = E::Name { id: "int" };
+    pub const DICT_STR_ANY: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple { elts: &[STR, ANY] },
+    };
+    pub const MAPPING_STR_ANY: E = E::Subscript {
+        value: &E::Attribute {
+            value: &E::Name {
+                id: "collections.abc",
+            },
+            attr: "Mapping",
+        },
+        slice: &E::Tuple { elts: &[STR, ANY] },
+    };
+    pub const DICT_AND_POS: E = E::Subscript {
+        value: &E::Name { id: "tuple" },
+        slice: &E::Tuple {
+            elts: &[DICT_STR_ANY, INT],
+        },
+    };
+    /// An iterable of `(name, kind, opts)` field tuples.
+    pub const FIELDS: E = E::Subscript {
+        value: &E::Attribute {
+            value: &E::Name {
+                id: "collections.abc",
+            },
+            attr: "Iterable",
+        },
+        slice: &E::Subscript {
+            value: &E::Name { id: "tuple" },
+            slice: &E::Tuple {
+                elts: &[
+                    E::BinOp {
+                        left: &STR,
+                        op: pyo3::inspect::PyStaticOperator::BitOr,
+                        right: &E::Constant {
+                            value: pyo3::inspect::PyStaticConstant::None,
+                        },
+                    },
+                    STR,
+                    DICT_STR_ANY,
+                ],
+            },
+        },
+    };
+    const LIST_STR: E = E::Subscript {
+        value: &E::Name { id: "list" },
+        slice: &STR,
+    };
+    const DICT_STR_LIST_STR: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple {
+            elts: &[STR, LIST_STR],
+        },
+    };
+    /// Most entries are a flat list of names, but `options` is keyed by
+    /// kind, so the value type is a union rather than just `list[str]`.
+    pub const VOCABULARY: E = E::Subscript {
+        value: &E::Name { id: "dict" },
+        slice: &E::Tuple {
+            elts: &[
+                STR,
+                E::BinOp {
+                    left: &LIST_STR,
+                    op: pyo3::inspect::PyStaticOperator::BitOr,
+                    right: &DICT_STR_LIST_STR,
+                },
+            ],
+        },
+    };
+}
+
+/// A returned object whose Python type the stub should spell out.
+macro_rules! returns {
+    ($(#[$m:meta])* $name:ident => $hint:expr) => {
+        $(#[$m])*
+        pub(crate) struct $name(pub(crate) Py<PyAny>);
+
+        impl<'py> IntoPyObject<'py> for $name {
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: pyo3::inspect::PyStaticExpr = $hint;
+            type Target = PyAny;
+            type Output = Bound<'py, PyAny>;
+            type Error = std::convert::Infallible;
+            fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+                Ok(self.0.into_bound(py))
+            }
+        }
+    };
+}
+
+returns!(
+    /// A decoded structure: `dict[str, Any]`.
+    Decoded => hint::DICT_STR_ANY
+);
+returns!(
+    /// Encoded wire bytes.
+    Encoded => hint::BYTES
+);
+returns!(
+    /// `(decoded, new position)`.
+    DecodedAt => hint::DICT_AND_POS
+);
+returns!(
+    /// `(decoded, new position)` or `Incomplete`.
+    Parsed => pyo3::inspect::PyStaticExpr::BinOp {
+        left: &hint::DICT_AND_POS,
+        op: pyo3::inspect::PyStaticOperator::BitOr,
+        right: &<Incomplete as pyo3::PyTypeInfo>::TYPE_HINT,
+    }
+);
+returns!(
+    /// The closed-set tables, `options` keyed by kind and the rest flat.
+    Vocabulary => hint::VOCABULARY
+);
+
+/// Anything supporting the buffer protocol.
+pub(crate) struct BufferArg<'py>(pub(crate) Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for BufferArg<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::BUFFER;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(BufferArg(ob.to_owned()))
+    }
+}
+
+/// The schema, as `compile` takes it.
+pub(crate) struct Fields<'py>(pub(crate) Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for Fields<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::FIELDS;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(Fields(ob.to_owned()))
+    }
+}
+
+/// A mapping of field values, as `pack` takes it.
+pub struct Values<'py>(Bound<'py, PyAny>);
+
+impl<'py> FromPyObject<'_, 'py> for Values<'py> {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: pyo3::inspect::PyStaticExpr = hint::MAPPING_STR_ANY;
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        Ok(Values(ob.to_owned()))
+    }
+}
+
 #[pyclass(module = "rustruct.core", frozen)]
 pub struct Codec {
     prog: Arc<Program>,
@@ -991,14 +706,15 @@ pub struct Codec {
 impl Codec {
     /// Requires the buffer to be fully consumed; a tail raises
     /// InvalidDataError with kind="trailing".
-    fn unpack(&self, py: Python<'_>, buf: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn unpack(&self, py: Python<'_>, buf: BufferArg<'_>) -> PyResult<Decoded> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
                 key_cache: &self.key_cache,
             };
             match core_unpack(&self.prog, &mut builder, data, 0, true, false) {
-                Outcome::Ok { value, .. } => Ok(value),
+                Outcome::Ok { value, .. } => Ok(Decoded(value)),
                 Outcome::Incomplete { .. } => unreachable!("stream=false"),
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -1012,16 +728,21 @@ impl Codec {
     fn unpack_from(
         &self,
         py: Python<'_>,
-        buf: &Bound<'_, PyAny>,
+        buf: BufferArg<'_>,
         offset: usize,
-    ) -> PyResult<(Py<PyAny>, usize)> {
+    ) -> PyResult<DecodedAt> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
                 key_cache: &self.key_cache,
             };
             match core_unpack(&self.prog, &mut builder, data, offset, false, false) {
-                Outcome::Ok { value, pos } => Ok((value, pos)),
+                Outcome::Ok { value, pos } => Ok(DecodedAt(
+                    PyTuple::new(py, [value, pos.into_pyobject(py)?.into_any().unbind()])?
+                        .into_any()
+                        .unbind(),
+                )),
                 Outcome::Incomplete { .. } => unreachable!("stream=false"),
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -1032,7 +753,8 @@ impl Codec {
 
     /// Streaming parse: a data shortage yields Incomplete, not an exception.
     #[pyo3(signature = (buf, offset = 0))]
-    fn parse(&self, py: Python<'_>, buf: &Bound<'_, PyAny>, offset: usize) -> PyResult<Py<PyAny>> {
+    fn parse(&self, py: Python<'_>, buf: BufferArg<'_>, offset: usize) -> PyResult<Parsed> {
+        let buf = &buf.0;
         with_buffer(py, buf, |data| {
             let mut builder = PyBuilder {
                 py,
@@ -1041,10 +763,10 @@ impl Codec {
             match core_unpack(&self.prog, &mut builder, data, offset, false, true) {
                 Outcome::Ok { value, pos } => {
                     let t = PyTuple::new(py, [value, pos.into_pyobject(py)?.into_any().unbind()])?;
-                    Ok(t.into_any().unbind())
+                    Ok(Parsed(t.into_any().unbind()))
                 }
                 Outcome::Incomplete { needed } => {
-                    Ok(Py::new(py, Incomplete { needed })?.into_any())
+                    Ok(Parsed(Py::new(py, Incomplete { needed })?.into_any()))
                 }
                 Outcome::Invalid { kind, offset, path } => {
                     Err(invalid_err(py, kind.as_str(), offset, &path))
@@ -1053,7 +775,8 @@ impl Codec {
         })
     }
 
-    fn pack(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn pack(&self, py: Python<'_>, values: Values<'_>) -> PyResult<Encoded> {
+        let values = &values.0;
         let source = PySource {
             key_cache: &self.key_cache,
             _marker: std::marker::PhantomData,
@@ -1062,7 +785,7 @@ impl Codec {
             return Err(PyTypeError::new_err("pack: expected a Mapping"));
         }
         match core_pack(&self.prog, &source, values) {
-            PackOutcome::Ok(bytes) => Ok(PyBytes::new(py, &bytes).into_any().unbind()),
+            PackOutcome::Ok(bytes) => Ok(Encoded(PyBytes::new(py, &bytes).into_any().unbind())),
             PackOutcome::Err { kind, path } => Err(pack_err(py, kind.as_str(), &path)),
         }
     }
@@ -1071,10 +794,12 @@ impl Codec {
     fn pack_into(
         &self,
         py: Python<'_>,
-        buf: &Bound<'_, PyAny>,
+        buf: BufferArg<'_>,
         offset: usize,
-        values: &Bound<'_, PyAny>,
+        values: Values<'_>,
     ) -> PyResult<usize> {
+        let buf = &buf.0;
+        let values = &values.0;
         let source = PySource {
             key_cache: &self.key_cache,
             _marker: std::marker::PhantomData,
@@ -1115,41 +840,48 @@ impl Codec {
         self.prog.static_size
     }
 
-    fn to_bytes(&self) -> PyResult<Py<PyAny>> {
+    /// The compiled `Program`, as Rust's own `Debug` rendering.
+    ///
+    /// Not an API: it lets a test assert that two schemas compile to the
+    /// *same program*, which comparing pack/unpack behaviour can only
+    /// approximate. Deterministic -- `Program` holds only `Vec`s,
+    /// `Arc<str>`/`Arc<[u8]>` and plain enums, all of which `Debug` by value
+    /// rather than by address.
+    fn _program_debug(&self) -> String {
+        format!("{:#?}", self.prog)
+    }
+
+    fn to_bytes(&self) -> PyResult<Encoded> {
         Err(PyNotImplementedError::new_err(
             "Program serialization is not implemented yet",
         ))
     }
 
     #[staticmethod]
-    fn from_bytes(_data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    fn from_bytes(_data: &[u8]) -> PyResult<Codec> {
         Err(PyNotImplementedError::new_err(
             "Program serialization is not implemented yet",
         ))
     }
 }
 
+/// Compile a schema in the documented `(name, kind, opts)` form.
+///
+/// This is `rustruct.compile`. The parsing it does is generated from the
+/// kind table in `parse.rs`, so the set of options a kind accepts and the
+/// code that reads them come out of one declaration.
 #[pyfunction]
 #[pyo3(signature = (fields, *, byteorder = "big", max_default = 67_108_864, max_count = 16_777_216))]
 fn compile(
     py: Python<'_>,
-    fields: &Bound<'_, PyAny>,
+    fields: Fields<'_>,
     byteorder: &str,
     max_default: usize,
     max_count: usize,
 ) -> PyResult<Codec> {
-    let bo = match byteorder {
-        "big" | "network" => ByteOrder::Big,
-        "little" => ByteOrder::Little,
-        other => {
-            return Err(schema_err(format!(
-                "byteorder {other:?} is not supported (only \"big\"/\"little\"/\"network\")"
-            )))
-        }
-    };
-    let parsed = parse_fields(fields)?;
+    let parsed = parse::parse_fields(&fields.0, &parse::Ctx::root())?;
     let opts = Options {
-        byteorder: bo,
+        byteorder: parse::Bo::parse(byteorder).map_err(schema_err)?,
         max_default,
         max_count,
     };
@@ -1162,15 +894,29 @@ fn compile(
     })
 }
 
+/// The compiled core: the compiler entry point and `Codec`.
+///
+/// `src/rustruct/core.pyi` is generated from this module by
+/// `make stubs` -- edit here and regenerate, never the stub.
+///
+/// Declared as an inline Rust module rather than a function because only
+/// this form is introspectable: pyo3 emits the member list at compile
+/// time, and it cannot know what a function body adds.
 #[pymodule(name = "core")]
-fn core_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Codec>()?;
-    m.add_class::<Incomplete>()?;
-    m.add_function(wrap_pyfunction!(compile, m)?)?;
-    m.add("RustructError", py.get_type::<RustructError>())?;
-    m.add("SchemaError", py.get_type::<SchemaError>())?;
-    m.add("InvalidDataError", py.get_type::<InvalidDataError>())?;
-    m.add("PackError", py.get_type::<PackError>())?;
-    m.add("__abi__", ABI)?;
-    Ok(())
+mod core_module {
+    #[pymodule_export]
+    use super::{compile, Codec, Incomplete};
+
+    /// Bumped on any change to the IR or the serialization format.
+    #[pymodule_export]
+    #[allow(non_upper_case_globals)]
+    const __abi__: u32 = super::ABI;
+
+    #[pymodule_export]
+    use super::parse::vocabulary;
+
+    // Deliberately no `#[pymodule_init]`: its presence would make pyo3 mark
+    // the module incomplete and append `def __getattr__(name: str) ->
+    // Incomplete: ...` to the generated stub, which tells a type checker to
+    // accept *any* attribute here -- including ones that no longer exist.
 }

@@ -1,62 +1,55 @@
 use std::sync::Arc;
 
 /// Machine names for data/value errors (closed list, v1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Truncated,
-    Trailing,
-    Range,
-    NegativeLen,
-    Overflow,
-    DivZero,
-    Unterminated,
-    NulInCstr,
-    NoCase,
-    Decode,
-    Limit,
-    Depth,
-    Checksum,
-    Const,
-    ReservedBits,
-    // pack-specific
-    Missing,
-    Length,
-    Indivisible,
-    Inconsistent,
-    Buffer,
-    UnknownFlag,
-    Type,
-    Encode,
+///
+/// The variant list, the wire spellings and `ALL` all come out of one
+/// macro invocation, so `rustruct.ErrorKind` on the Python side has exactly
+/// one thing to stay in step with -- and `tests/test_vocabulary.py` asserts
+/// it does, against `ALL` as published by the extension module.
+macro_rules! error_kinds {
+    ($($variant:ident => $name:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Kind {
+            $($variant),+
+        }
+
+        impl Kind {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Kind::$variant => $name),+
+                }
+            }
+
+            /// Every spelling `as_str` can produce.
+            pub const ALL: &'static [&'static str] = &[$($name),+];
+        }
+    };
 }
 
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Truncated => "truncated",
-            Kind::Trailing => "trailing",
-            Kind::Range => "range",
-            Kind::NegativeLen => "negative_len",
-            Kind::Overflow => "overflow",
-            Kind::DivZero => "div_zero",
-            Kind::Unterminated => "unterminated",
-            Kind::NulInCstr => "nul_in_cstr",
-            Kind::NoCase => "no_case",
-            Kind::Decode => "decode",
-            Kind::Limit => "limit",
-            Kind::Depth => "depth",
-            Kind::Checksum => "checksum",
-            Kind::Const => "const",
-            Kind::ReservedBits => "reserved_bits",
-            Kind::Missing => "missing",
-            Kind::Length => "length",
-            Kind::Indivisible => "indivisible",
-            Kind::Inconsistent => "inconsistent",
-            Kind::Buffer => "buffer",
-            Kind::UnknownFlag => "unknown_flag",
-            Kind::Type => "type",
-            Kind::Encode => "encode",
-        }
-    }
+error_kinds! {
+    Truncated => "truncated",
+    Trailing => "trailing",
+    Range => "range",
+    NegativeLen => "negative_len",
+    Overflow => "overflow",
+    DivZero => "div_zero",
+    Unterminated => "unterminated",
+    NulInCstr => "nul_in_cstr",
+    NoCase => "no_case",
+    Decode => "decode",
+    Limit => "limit",
+    Depth => "depth",
+    Checksum => "checksum",
+    Const => "const",
+    ReservedBits => "reserved_bits",
+    Missing => "missing",
+    Length => "length",
+    Indivisible => "indivisible",
+    Inconsistent => "inconsistent",
+    Buffer => "buffer",
+    UnknownFlag => "unknown_flag",
+    Type => "type",
+    Encode => "encode",
 }
 
 /// A segment of the path to the field that failed. The path is assembled

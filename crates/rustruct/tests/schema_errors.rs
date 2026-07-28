@@ -43,24 +43,41 @@ fn nested_error_path() {
     assert_eq!(path, "outer.items[1].name");
 }
 
-#[test]
-fn depth_limit() {
-    // 70 nested structs -> depth
+/// A schema `n` structs deep, counting the one this returns.
+fn nested(n: usize) -> TypeIn {
     let mut ty = TypeIn::StructT {
         fields: vec![f("x", int(IntPrim::U8))],
         byteorder: None,
         size: None,
     };
-    for _ in 0..70 {
+    for _ in 1..n {
         ty = TypeIn::StructT {
             fields: vec![f("s", ty)],
             byteorder: None,
             size: None,
         };
     }
-    let prog = build(vec![f("root", ty)]);
-    let (kind, _) = unpack_err(&prog, &[0]);
-    assert_eq!(kind, Kind::Depth);
+    ty
+}
+
+#[test]
+fn depth_limit_is_a_compile_error() {
+    // Unpacking allows 64 frames and a struct costs one, so a schema past
+    // that could never decode anything. It used to compile and pack
+    // regardless, and only fail on the first unpack; now it is refused
+    // where the problem actually is.
+    let e = compile(&[f("root", nested(70))], &Options::default()).unwrap_err();
+    assert!(e.msg.contains("structs deep"), "{}", e.msg);
+}
+
+#[test]
+fn depth_limit_boundary() {
+    // The outermost frame is the schema itself, so 63 nested structs fit
+    // in the 64 and the 64th is one too many.
+    let prog = build(vec![f("root", nested(63))]);
+    unpack_ok(&prog, &[0]);
+    let e = compile(&[f("root", nested(64))], &Options::default()).unwrap_err();
+    assert!(e.msg.contains("65 structs deep"), "{}", e.msg);
 }
 
 #[test]

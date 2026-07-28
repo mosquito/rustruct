@@ -2,7 +2,7 @@
 
 import pytest
 
-from helpers import u
+from helpers import nest_arrays, u
 from rustruct import InvalidDataError, compile
 
 
@@ -59,6 +59,29 @@ def test_nested_arrays():
     assert codec.pack(values) == b"\x01\x02\x03\x04"
 
 
+def test_deep_array_nesting_decodes_past_the_struct_frame_limit():
+    # Unpack frames are capped at 64, but only `struct` costs one, so that
+    # cap says nothing about arrays: this nests to the parser's own limit
+    # and still decodes. It is also why that limit cannot be lowered to
+    # match the frame cap -- it would start rejecting schemas that work.
+    codec = compile(nest_arrays(128))
+    assert codec.pack(codec.unpack(b"\x07")) == b"\x07"
+
+
+def test_array_count_limit_is_inclusive():
+    # max_count is the largest count that decodes, not the first one that
+    # fails; the limit tests above only show that something well past it
+    # is rejected, which holds either way round.
+    codec = compile(
+        (u("n", "u8"), u("items", "array", elem=("u8", {}), count=("ref", "n"))),
+        max_count=4,
+    )
+    assert codec.unpack(b"\x04\x01\x02\x03\x04")["items"] == [1, 2, 3, 4]
+    with pytest.raises(InvalidDataError) as ei:
+        codec.unpack(b"\x05\x01\x02\x03\x04\x05")
+    assert ei.value.kind == "limit"
+
+
 def test_array_element_error_reports_index():
     codec = compile((u("items", "array", elem=("u8", {"const": 0xAB}), count=3),))
     with pytest.raises(InvalidDataError) as ei:
@@ -76,3 +99,11 @@ def test_array_element_struct_refs_enclosing_scope():
     )
     values = codec.unpack(bytes([2, ord("a"), ord("b"), ord("c"), ord("d")]))
     assert values["items"] == [{"value": b"ab"}, {"value": b"cd"}]
+
+
+def test_array_count_and_until_eof_are_mutually_exclusive():
+    # Previously `count` was silently discarded whenever until_eof was set.
+    from rustruct import array
+
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        array(elem=("u8", {}), count=3, until_eof=True)
