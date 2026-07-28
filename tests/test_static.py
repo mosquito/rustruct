@@ -198,6 +198,44 @@ def test_deep_schema_is_rejected_not_a_crash():
         compile(nest_structs(4000))
 
 
+def nest_arrays(depth):
+    """A schema `depth` levels of array-of-array deep, around one u8."""
+    spec = ("u8", {})
+    for _ in range(depth):
+        spec = ("array", {"elem": spec, "count": 1})
+    return (u("n", spec[0], **spec[1]),)
+
+
+def test_deep_array_nesting_is_rejected_not_a_crash():
+    # A nested `elem` recurses through the type spec, not through a field
+    # list the way struct-in-struct does -- a separate way down into the
+    # same parser, so it needs its own proof that the cap is on the path.
+    # Uncapped this one survives further than struct nesting does: it took
+    # ~5k levels to segfault on a default 8 MB stack, hence 8000 here.
+    compile(nest_arrays(60))
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(nest_arrays(8000))
+
+
+def nest_expr(depth):
+    """A length expression `depth` operators deep, worth 1 either way."""
+    e = 1
+    for _ in range(depth):
+        e = ("add", e, 0)
+    return e
+
+
+def test_deep_expression_is_rejected_not_a_crash():
+    # Expressions recurse on a counter of their own, reset per option, so
+    # the schema cap says nothing about them: uncapped, one flat field with
+    # a deep enough `len` segfaults on its own (~12k levels on a default
+    # 8 MB stack, hence 20000 here).
+    codec = compile((u("b", "bytes", len=nest_expr(60)),))
+    assert codec.unpack(b"\x07") == {"b": b"\x07"}
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile((u("b", "bytes", len=nest_expr(20000)),))
+
+
 def test_deep_schema_limit_is_above_anything_usable():
     # Struct nesting is capped at 64 frames when unpacking, so a schema
     # deeper than that already fails every decode -- the parser's own limit
