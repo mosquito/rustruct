@@ -9,4 +9,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustruct-core = { path = "../rustruct" }
-pyo3 = { version = "0.26", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
+
+[features]
+# Forwards pyo3's stub-introspection feature, so `#[cfg(feature = ...)]`
+# in this crate lines up with it. Off by default: the JSON blobs it embeds
+# are only wanted when generating the type stub.
+experimental-inspect = ["pyo3/experimental-inspect"]
