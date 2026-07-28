@@ -19,6 +19,9 @@ uv run python run.py --budget 0.1 --rounds 5 --min-iterations 50
 uv run python run.py --budget 0.001 --rounds 1 --min-iterations 1
 ```
 
+`--markdown` prints the same tables as markdown instead of boxes, ready to
+paste into a pull request.
+
 ## Workloads
 
 * **scalars(n)** -- a fixed struct of `n` u16 fields (field-count scaling).
