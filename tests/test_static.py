@@ -181,6 +181,35 @@ def test_schema_errors():
         compile((u("x", "wat"),))  # unknown kind
 
 
+def nest_structs(depth):
+    """A schema `depth` levels of struct-in-struct deep, around one u8."""
+    field = u("leaf", "u8")
+    for _ in range(depth):
+        field = u("n", "struct", fields=(field,))
+    return (field,)
+
+
+def test_deep_schema_is_rejected_not_a_crash():
+    # parse_type/parse_type_spec/parse_fields are mutually recursive over
+    # caller-supplied data, so an unbounded schema used to overflow the C
+    # stack and kill the interpreter outright (SIGSEGV, nothing to catch).
+    compile(nest_structs(64))  # comfortably inside the limit
+    with pytest.raises(SchemaError, match="nests deeper"):
+        compile(nest_structs(4000))
+
+
+def test_deep_schema_limit_is_above_anything_usable():
+    # Struct nesting is capped at 64 frames when unpacking, so a schema
+    # deeper than that already fails every decode -- the parser's own limit
+    # has to sit above it, never below.
+    codec = compile(nest_structs(63))
+    assert codec.unpack(b"\x01")
+    codec = compile(nest_structs(64))
+    with pytest.raises(InvalidDataError) as excinfo:
+        codec.unpack(b"\x01")
+    assert excinfo.value.kind == "depth"
+
+
 def test_exception_hierarchy():
     import rustruct
 
@@ -216,3 +245,48 @@ def test_struct_parity_semantics():
     names = ["a", "b", "c", "d", "e", "f", "g", "h"]
     expected = dict(zip(names, pystruct.unpack(">BHIQbhiq", buf), strict=True))
     assert codec.unpack(buf) == expected
+
+
+def test_schema_errors_say_where_they_came_from():
+    # The same complaint at three different depths used to produce three
+    # byte-identical messages, so finding the offending field meant
+    # re-reading the whole schema.
+    def typo_at(fields):
+        with pytest.raises(SchemaError) as excinfo:
+            compile(fields)
+        return str(excinfo.value)
+
+    assert typo_at((u("x", "u8", typo=1),)).endswith("(at x)")
+    assert typo_at((u("frame", "struct", fields=(u("x", "u8", typo=1),)),)).endswith("(at frame.x)")
+    nested = (u("a", "struct", fields=(u("b", "struct", fields=(u("x", "u8", typo=1),)),)),)
+    assert typo_at(nested).endswith("(at a.b.x)")
+
+
+def test_schema_error_paths_name_the_container_that_led_there():
+    def typo_at(fields):
+        with pytest.raises(SchemaError) as excinfo:
+            compile(fields)
+        return str(excinfo.value)
+
+    elem = ("struct", {"fields": (u("x", "u8", typo=1),)})
+    assert typo_at((u("rows", "array", elem=elem, count=1),)).endswith("(at rows[].x)")
+
+    switch_fields = (
+        u("t", "u8"),
+        u("b", "switch", on=("ref", "t"), cases=((7, elem),)),
+    )
+    assert typo_at(switch_fields).endswith("(at b?7.x)")
+
+    default_fields = (
+        u("t", "u8"),
+        u("b", "switch", on=("ref", "t"), cases=((1, ("u8", {})),), default=elem),
+    )
+    assert typo_at(default_fields).endswith("(at b?default.x)")
+
+    assert typo_at(((None, "raw", {"len": 1, "typo": 1}),)).endswith("(at <unnamed>)")
+
+
+def test_schema_error_is_located_once_not_at_every_level():
+    with pytest.raises(SchemaError) as excinfo:
+        compile((u("a", "struct", fields=(u("b", "struct", fields=(u("x", "wat"),)),)),))
+    assert str(excinfo.value).count("(at ") == 1

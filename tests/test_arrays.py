@@ -76,3 +76,11 @@ def test_array_element_struct_refs_enclosing_scope():
     )
     values = codec.unpack(bytes([2, ord("a"), ord("b"), ord("c"), ord("d")]))
     assert values["items"] == [{"value": b"ab"}, {"value": b"cd"}]
+
+
+def test_array_count_and_until_eof_are_mutually_exclusive():
+    # Previously `count` was silently discarded whenever until_eof was set.
+    from rustruct import array
+
+    with pytest.raises(TypeError, match="mutually exclusive"):
+        array(elem=("u8", {}), count=3, until_eof=True)
