@@ -100,7 +100,7 @@ writes zeros.
 {py:attr}`PackError.kind <rustruct.PackError>`, so branching on one does not
 depend on retyping a string correctly:
 
-<!-- name: test_vocabulary_reference -->
+<!-- name: test_error_kind_reference -->
 ```python
 from rustruct import ErrorKind, InvalidDataError, compile
 
