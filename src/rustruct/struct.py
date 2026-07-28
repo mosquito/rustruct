@@ -24,9 +24,11 @@ import typing
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
+from .core import SchemaError
 from .core import compile as compile_codec
 from .fields import MISSING, FieldSpec, Registry
 from .scalars import ScalarType
+from .vocab import ByteOrder, KindArg
 
 
 class FromMapping(Protocol):
@@ -235,45 +237,19 @@ class FieldDecl:
         self.help = help
 
 
-Kind = typing.Literal[
-    "u8",
-    "i8",
-    "u16",
-    "i16",
-    "u32",
-    "i32",
-    "u64",
-    "i64",
-    "f32",
-    "f64",
-    "bool",
-    "raw",
-    "bytes",
-    "str",
-    "cstr",
-    "bits",
-    "flags",
-    "struct",
-    "array",
-    "switch",
-    "cond",
-    "digest",
-]
-"""Every kind string rustruct.compile()'s Rust side actually recognizes
-(crates/rustruct-py/src/lib.rs's parse_type match) -- a closed set, so
-`Field.kind` can be a Literal instead of a bare `str` and a typo shows up
-at type-check time instead of a runtime SchemaError."""
-
-
 class Field(typing.NamedTuple):
     """One entry of `resolved.fields_tuple`, matching rustruct.compile()'s
     expected shape (core.pyi's `Field`) -- a real NamedTuple so a call site
     reads as `Field(name=..., kind=..., opts=...)`. Still a plain tuple at
     the C level (pyo3's downcast is structural), so the core side needs no
-    changes to accept it."""
+    changes to accept it.
+
+    `kind` is `KindArg`, not bare `Kind`: the low-level form is documented
+    as taking plain strings and the whole test suite, the doc snippets and
+    the benchmark all pass them, so the annotation has to admit both."""
 
     name: str | None
-    kind: Kind
+    kind: KindArg
     opts: dict
 
 
@@ -745,7 +721,20 @@ class StructMeta(type):
         # attribute set below resolves against Struct's shape, not `type`.
         cls = cast("type[Struct]", super().__new__(mcls, name, bases, namespace))
         if byteorder is not None:
-            cls.byteorder = byteorder
+            # Coerced here rather than left for compile(): a bad byteorder
+            # is then a SchemaError naming this class, at the `class`
+            # statement, instead of one naming nothing at all on some later
+            # first pack(). ByteOrder has no NATIVE member, so the core's
+            # refusal of it is reproduced by construction -- but keep the
+            # core's own wording, which explains why.
+            try:
+                cls.byteorder = ByteOrder(byteorder)
+            except ValueError:
+                raise SchemaError(
+                    f"{name}: byteorder {byteorder!r} is not supported (only "
+                    f'"big"/"little"/"network"; "native" is forbidden, since it '
+                    f"makes the wire format depend on the running machine)"
+                ) from None
         if registry:
             cls.dispatch_registry = Registry()
             cls.registry_key = None
@@ -769,7 +758,7 @@ class StructMeta(type):
 
 
 class Struct(metaclass=StructMeta):
-    byteorder: ClassVar[str] = "big"
+    byteorder: ClassVar[ByteOrder] = ByteOrder.BIG
     dispatch_registry: ClassVar[Registry | None] = None
     registry_key: ClassVar[Any] = None
 

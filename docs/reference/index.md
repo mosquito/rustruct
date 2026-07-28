@@ -8,6 +8,7 @@ a particular task. The public Python API is re-exported from `rustruct`.
 
 structures
 fields
+vocabulary
 schema-language
 low-level-schema
 runtime

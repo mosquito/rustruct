@@ -321,8 +321,10 @@ interpretation. `const=` declares a value that is emitted automatically and
 verified during unpack.
 
 Digest algorithms include CRC presets, the IPv4 Internet checksum, MD5,
-SHA-1, and SHA-256. `over="*"` covers the enclosing region while treating the
-digest field itself as zero. A tuple names sibling spans.
+SHA-1, and SHA-256; {py:class}`rustruct.Algo` names all nine, and
+{doc}`vocabulary` tabulates them with their field widths. `over="*"` covers
+the enclosing region while treating the digest field itself as zero. A tuple
+names sibling spans.
 
 ## Limits
 

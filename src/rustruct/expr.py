@@ -12,6 +12,8 @@ A field descriptor position (len=/count=/on=/size=) accepts, uniformly:
                                            operator overloading on FieldExpr
 """
 
+from .vocab import BinOp
+
 
 class FieldExpr:
     """A symbolic placeholder for a sibling field's value, built up via
@@ -34,76 +36,76 @@ class FieldExpr:
         return FieldExpr((op, self.operand(other), self.node))
 
     def __add__(self, other):
-        return self.binop("add", other)
+        return self.binop(BinOp.ADD, other)
 
     def __radd__(self, other):
-        return self.rbinop("add", other)
+        return self.rbinop(BinOp.ADD, other)
 
     def __sub__(self, other):
-        return self.binop("sub", other)
+        return self.binop(BinOp.SUB, other)
 
     def __rsub__(self, other):
-        return self.rbinop("sub", other)
+        return self.rbinop(BinOp.SUB, other)
 
     def __mul__(self, other):
-        return self.binop("mul", other)
+        return self.binop(BinOp.MUL, other)
 
     def __rmul__(self, other):
-        return self.rbinop("mul", other)
+        return self.rbinop(BinOp.MUL, other)
 
     def __floordiv__(self, other):
-        return self.binop("div", other)
+        return self.binop(BinOp.DIV, other)
 
     def __rfloordiv__(self, other):
-        return self.rbinop("div", other)
+        return self.rbinop(BinOp.DIV, other)
 
     def __lshift__(self, other):
-        return self.binop("shl", other)
+        return self.binop(BinOp.SHL, other)
 
     def __rlshift__(self, other):
-        return self.rbinop("shl", other)
+        return self.rbinop(BinOp.SHL, other)
 
     def __rshift__(self, other):
-        return self.binop("shr", other)
+        return self.binop(BinOp.SHR, other)
 
     def __rrshift__(self, other):
-        return self.rbinop("shr", other)
+        return self.rbinop(BinOp.SHR, other)
 
     def __and__(self, other):
-        return self.binop("and", other)
+        return self.binop(BinOp.AND, other)
 
     def __rand__(self, other):
-        return self.rbinop("and", other)
+        return self.rbinop(BinOp.AND, other)
 
     def __or__(self, other):
-        return self.binop("or", other)
+        return self.binop(BinOp.OR, other)
 
     def __ror__(self, other):
-        return self.rbinop("or", other)
+        return self.rbinop(BinOp.OR, other)
 
     def __xor__(self, other):
-        return self.binop("xor", other)
+        return self.binop(BinOp.XOR, other)
 
     def __rxor__(self, other):
-        return self.rbinop("xor", other)
+        return self.rbinop(BinOp.XOR, other)
 
     def __eq__(self, other):
-        return self.binop("eq", other)
+        return self.binop(BinOp.EQ, other)
 
     def __ne__(self, other):
-        return self.binop("ne", other)
+        return self.binop(BinOp.NE, other)
 
     def __lt__(self, other):
-        return self.binop("lt", other)
+        return self.binop(BinOp.LT, other)
 
     def __le__(self, other):
-        return self.binop("le", other)
+        return self.binop(BinOp.LE, other)
 
     def __gt__(self, other):
-        return self.binop("gt", other)
+        return self.binop(BinOp.GT, other)
 
     def __ge__(self, other):
-        return self.binop("ge", other)
+        return self.binop(BinOp.GE, other)
 
     __hash__ = None
 

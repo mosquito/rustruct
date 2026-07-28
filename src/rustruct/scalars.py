@@ -5,59 +5,61 @@ means they can later be mixed into an enum wrapper, e.g.
 """
 
 from dataclasses import dataclass
-from types import MappingProxyType
+from typing import ClassVar
+
+from .vocab import Kind
 
 
 @dataclass(frozen=True, slots=True)
 class ScalarType:
     """Base of every scalar sentinel; `kind` is the rustruct.compile() kind
-    string ("u8", "f32", "bool", ...)."""
+    this sentinel stands for.
 
-    kind = None
+    Annotated ClassVar so it stays a class attribute rather than becoming a
+    dataclass field -- these types are used as sentinels, never instantiated."""
+
+    kind: ClassVar[Kind]
 
 
 class U8(ScalarType):
-    kind = "u8"
+    kind = Kind.U8
 
 
 class I8(ScalarType):
-    kind = "i8"
+    kind = Kind.I8
 
 
 class U16(ScalarType):
-    kind = "u16"
+    kind = Kind.U16
 
 
 class I16(ScalarType):
-    kind = "i16"
+    kind = Kind.I16
 
 
 class U32(ScalarType):
-    kind = "u32"
+    kind = Kind.U32
 
 
 class I32(ScalarType):
-    kind = "i32"
+    kind = Kind.I32
 
 
 class U64(ScalarType):
-    kind = "u64"
+    kind = Kind.U64
 
 
 class I64(ScalarType):
-    kind = "i64"
+    kind = Kind.I64
 
 
 class F32(ScalarType):
-    kind = "f32"
+    kind = Kind.F32
 
 
 class F64(ScalarType):
-    kind = "f64"
+    kind = Kind.F64
 
 
 class Bool(ScalarType):
-    kind = "bool"
-
-
-SCALARS_BY_KIND = MappingProxyType({t.kind: t for t in (U8, I8, U16, I16, U32, I32, U64, I64, F32, F64, Bool)})
+    kind = Kind.BOOL
