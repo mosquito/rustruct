@@ -396,11 +396,15 @@ def ast_signature(posargs, kwonlyargs=(), kw_defaults=(), defaults=()):
 # here already claims to be at line 1.
 POSITION: dict[str, Any] = {"lineno": 1, "col_offset": 0}
 
-# One each, shared by every node in every tree. A context is a marker with
-# no fields and no position slot (`_fields` and `_attributes` are both
-# empty), so there is nothing in one to write and nothing to race on --
-# `compile()` only ever reads the tree. Building a fresh one per node cost
-# a hundred allocations a class for nothing.
+# One each, shared by every node in every tree. A context is a marker: the
+# AST grammar gives `expr_context` no fields at all, so `_fields` and
+# `_attributes` are both empty and there is nothing in one to write, and
+# nothing to race on -- `compile()` only ever reads the tree.
+#
+# This is also what CPython itself does: every tree `ast.parse` returns
+# shares a single `Load` across all of its nodes, and the same one between
+# trees. Building a fresh context per node cost a hundred allocations a
+# class for nothing.
 LOAD = ast.Load()
 STORE = ast.Store()
 
