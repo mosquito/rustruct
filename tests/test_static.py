@@ -2,7 +2,7 @@
 
 import pytest
 
-from helpers import u
+from helpers import nest_arrays, nest_expr, nest_structs, u
 from rustruct import Codec, InvalidDataError, PackError, SchemaError, compile
 
 
@@ -181,14 +181,6 @@ def test_schema_errors():
         compile((u("x", "wat"),))  # unknown kind
 
 
-def nest_structs(depth):
-    """A schema `depth` levels of struct-in-struct deep, around one u8."""
-    field = u("leaf", "u8")
-    for _ in range(depth):
-        field = u("n", "struct", fields=(field,))
-    return (field,)
-
-
 def test_deep_schema_is_rejected_not_a_crash():
     # parse_type/parse_type_spec/parse_fields are mutually recursive over
     # caller-supplied data, so an unbounded schema used to overflow the C
@@ -196,14 +188,6 @@ def test_deep_schema_is_rejected_not_a_crash():
     compile(nest_structs(64))  # comfortably inside the limit
     with pytest.raises(SchemaError, match="nests deeper"):
         compile(nest_structs(4000))
-
-
-def nest_arrays(depth):
-    """A schema `depth` levels of array-of-array deep, around one u8."""
-    spec = ("u8", {})
-    for _ in range(depth):
-        spec = ("array", {"elem": spec, "count": 1})
-    return (u("n", spec[0], **spec[1]),)
 
 
 def test_deep_array_nesting_is_rejected_not_a_crash():
@@ -217,14 +201,6 @@ def test_deep_array_nesting_is_rejected_not_a_crash():
         compile(nest_arrays(8000))
 
 
-def nest_expr(depth):
-    """A length expression `depth` operators deep, worth 1 either way."""
-    e = 1
-    for _ in range(depth):
-        e = ("add", e, 0)
-    return e
-
-
 def test_deep_expression_is_rejected_not_a_crash():
     # Expressions recurse on a counter of their own, reset per option, so
     # the schema cap says nothing about them: uncapped, one flat field with
@@ -234,6 +210,24 @@ def test_deep_expression_is_rejected_not_a_crash():
     assert codec.unpack(b"\x07") == {"b": b"\x07"}
     with pytest.raises(SchemaError, match="nests deeper"):
         compile((u("b", "bytes", len=nest_expr(20000)),))
+
+
+def test_depth_caps_are_exactly_where_they_claim():
+    # Everything else about depth is tested thousands of levels past the
+    # cap, so raising it tenfold would leave all of it green. The number
+    # is the whole safety margin against a stack overflow, so it gets a
+    # test that fails the moment it moves.
+    #
+    # Two caps, counted separately: one for how deep types nest, one for
+    # how deep a single expression nests (reset per option, so a schema
+    # full of 128-deep lengths is fine).
+    compile(nest_structs(128))
+    with pytest.raises(SchemaError, match="deeper than 128"):
+        compile(nest_structs(129))
+
+    compile((u("b", "bytes", len=nest_expr(128)),))
+    with pytest.raises(SchemaError, match="deeper than 128"):
+        compile((u("b", "bytes", len=nest_expr(129)),))
 
 
 def test_absurdly_deep_schema_is_rejected_cheaply():
@@ -251,9 +245,14 @@ def test_absurdly_deep_schema_is_rejected_cheaply():
 
 
 def test_deep_schema_limit_is_above_anything_usable():
-    # Struct nesting is capped at 64 frames when unpacking, so a schema
-    # deeper than that already fails every decode -- the parser's own limit
-    # has to sit above it, never below.
+    # Unpacking caps frames at 64, and a nested struct is what costs one,
+    # so struct nesting past that fails every decode -- the parser's own
+    # limit has to sit above it, never below, or a schema the decoder
+    # handles would not even compile.
+    #
+    # This bounds the parser's limit from below only. It says nothing
+    # about other nesting: arrays cost no frame and decode far deeper,
+    # see test_deep_array_nesting_decodes_past_the_struct_frame_limit.
     codec = compile(nest_structs(63))
     assert codec.unpack(b"\x01")
     codec = compile(nest_structs(64))
