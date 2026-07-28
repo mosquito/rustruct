@@ -42,63 +42,71 @@ const MAX_EXPR_DEPTH: usize = 128;
 
 // ---------- closed sets ----------
 
-use rustruct_core::closed_set;
+use rustruct_core::names::ClosedSet;
 
-closed_set!(
-    Bo,
-    ByteOrder,
-    "byteorder",
-    "only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes \
-     the wire format depend on the running machine",
-    [
-        ByteOrder::Big => "big",
-        // A struct-module-style spelling of `!`, i.e. big -- an entry of its
-        // own rather than an alias, because it is published as a member.
-        ByteOrder::Big => "network",
-        ByteOrder::Little => "little",
-    ]
-);
+/// Byte orders `compile()` takes. `network` is a struct-module-style
+/// spelling of `!`, i.e. big -- an entry of its own rather than a spelling
+/// of `"big"`, because it is published as a `rustruct.ByteOrder` member.
+static BYTEORDERS: ClosedSet<ByteOrder> = ClosedSet {
+    what: "byteorder",
+    allowed: "only \"big\"/\"little\"/\"network\"; \"native\" is forbidden, since it makes \
+              the wire format depend on the running machine",
+    eq: str::eq,
+    names: &[
+        ("big", ByteOrder::Big),
+        ("network", ByteOrder::Big),
+        ("little", ByteOrder::Little),
+    ],
+    aliases: &[],
+};
 
-closed_set!(
-    Prim,
-    IntPrim,
-    "an integer kind",
-    "only \"u8\"/\"i8\" through \"u64\"/\"i64\"",
-    [
-        IntPrim::U8 => "u8",
-        IntPrim::I8 => "i8",
-        IntPrim::U16 => "u16",
-        IntPrim::I16 => "i16",
-        IntPrim::U32 => "u32",
-        IntPrim::I32 => "i32",
-        IntPrim::U64 => "u64",
-        IntPrim::I64 => "i64",
-    ]
-);
+/// A byte order named at the top level of `compile()`.
+pub fn byteorder(s: &str) -> PyResult<ByteOrder> {
+    BYTEORDERS.parse(s).map_err(schema_err)
+}
 
-closed_set!(
-    Op,
-    BinOp,
-    "an operator",
-    "one of add/sub/mul/div/shl/shr/and/or/xor/eq/ne/lt/le/gt/ge",
-    [
-        BinOp::Add => "add",
-        BinOp::Sub => "sub",
-        BinOp::Mul => "mul",
-        BinOp::Div => "div",
-        BinOp::Shl => "shl",
-        BinOp::Shr => "shr",
-        BinOp::And => "and",
-        BinOp::Or => "or",
-        BinOp::Xor => "xor",
-        BinOp::Eq => "eq",
-        BinOp::Ne => "ne",
-        BinOp::Lt => "lt",
-        BinOp::Le => "le",
-        BinOp::Gt => "gt",
-        BinOp::Ge => "ge",
-    ]
-);
+/// The fixed-width integer kinds.
+static INT_PRIMS: ClosedSet<IntPrim> = ClosedSet {
+    what: "an integer kind",
+    allowed: "only \"u8\"/\"i8\" through \"u64\"/\"i64\"",
+    eq: str::eq,
+    names: &[
+        ("u8", IntPrim::U8),
+        ("i8", IntPrim::I8),
+        ("u16", IntPrim::U16),
+        ("i16", IntPrim::I16),
+        ("u32", IntPrim::U32),
+        ("i32", IntPrim::I32),
+        ("u64", IntPrim::U64),
+        ("i64", IntPrim::I64),
+    ],
+    aliases: &[],
+};
+
+/// The heads an expression tuple can carry.
+static BINOPS: ClosedSet<BinOp> = ClosedSet {
+    what: "an operator",
+    allowed: "one of add/sub/mul/div/shl/shr/and/or/xor/eq/ne/lt/le/gt/ge",
+    eq: str::eq,
+    names: &[
+        ("add", BinOp::Add),
+        ("sub", BinOp::Sub),
+        ("mul", BinOp::Mul),
+        ("div", BinOp::Div),
+        ("shl", BinOp::Shl),
+        ("shr", BinOp::Shr),
+        ("and", BinOp::And),
+        ("or", BinOp::Or),
+        ("xor", BinOp::Xor),
+        ("eq", BinOp::Eq),
+        ("ne", BinOp::Ne),
+        ("lt", BinOp::Lt),
+        ("le", BinOp::Le),
+        ("gt", BinOp::Gt),
+        ("ge", BinOp::Ge),
+    ],
+    aliases: &[],
+};
 
 // ---------- where parsing is ----------
 
@@ -273,11 +281,15 @@ simple!(p_bytes, Vec<u8>, "bytes");
 simple!(p_string, String, "a str");
 
 fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ByteOrder> {
-    Bo::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
+    BYTEORDERS
+        .parse(&p_string(v, kind, key, _ctx)?)
+        .map_err(schema_err)
 }
 
 fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<IntPrim> {
-    Prim::parse(&p_string(v, kind, key, _ctx)?).map_err(schema_err)
+    INT_PRIMS
+        .parse(&p_string(v, kind, key, _ctx)?)
+        .map_err(schema_err)
 }
 
 /// Rejected here rather than at compile time, so the message names the
@@ -353,7 +365,7 @@ fn expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, depth: usize) -> PyResult<E
         )));
     }
     Ok(ExprIn::Bin(
-        Op::parse(head).map_err(schema_err)?,
+        BINOPS.parse(head).map_err(schema_err)?,
         Box::new(expr(&t.get_item(1)?, kind, key, depth + 1)?),
         Box::new(expr(&t.get_item(2)?, kind, key, depth + 1)?),
     ))
@@ -521,7 +533,7 @@ kinds! {
     ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"] {
         byteorder: opt p_byteorder,
         r#const:   opt p_i128,
-    } => TypeIn::Int { prim: Prim::parse(kind).map_err(schema_err)?, byteorder, const_: r#const };
+    } => TypeIn::Int { prim: INT_PRIMS.parse(kind).map_err(schema_err)?, byteorder, const_: r#const };
 
     ["f32", "f64"] {
         byteorder: opt p_byteorder,
@@ -703,30 +715,33 @@ pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>>
 /// exists only in Rust stays invisible to Python and simply goes unused.
 #[pyfunction]
 pub fn vocabulary(py: Python<'_>) -> PyResult<crate::Vocabulary> {
-    use rustruct_core::digest::Algos;
+    use rustruct_core::digest::ALGOS;
     use rustruct_core::error::Kind as ErrKind;
-    use rustruct_core::program::{Encodings, RestPolicies};
+    use rustruct_core::program::{ENCODINGS, REST_POLICIES};
 
     let d = PyDict::new(py);
-    d.set_item("byteorders", Bo::ALL)?;
-    d.set_item("int_prims", Prim::ALL)?;
-    d.set_item("binops", Op::ALL)?;
+    d.set_item("byteorders", BYTEORDERS.names().collect::<Vec<_>>())?;
+    d.set_item("int_prims", INT_PRIMS.names().collect::<Vec<_>>())?;
+    d.set_item("binops", BINOPS.names().collect::<Vec<_>>())?;
     d.set_item("error_kinds", ErrKind::ALL)?;
-    d.set_item("encodings", Encodings::ALL)?;
-    d.set_item("algos", Algos::ALL)?;
-    d.set_item("rest_policies", RestPolicies::ALL)?;
+    d.set_item("encodings", ENCODINGS.names().collect::<Vec<_>>())?;
+    d.set_item("algos", ALGOS.names().collect::<Vec<_>>())?;
+    d.set_item("rest_policies", REST_POLICIES.names().collect::<Vec<_>>())?;
 
     // Spellings a set takes without publishing as a name of its own -- for
     // most sets the same list, for encodings the aliases too. Published so
     // the alias coverage in `tests/test_vocabulary.py` is read off the core
     // rather than retyped.
     let accepted = PyDict::new(py);
-    accepted.set_item("byteorders", Bo::ACCEPTED)?;
-    accepted.set_item("int_prims", Prim::ACCEPTED)?;
-    accepted.set_item("binops", Op::ACCEPTED)?;
-    accepted.set_item("encodings", Encodings::ACCEPTED)?;
-    accepted.set_item("algos", Algos::ACCEPTED)?;
-    accepted.set_item("rest_policies", RestPolicies::ACCEPTED)?;
+    accepted.set_item("byteorders", BYTEORDERS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("int_prims", INT_PRIMS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("binops", BINOPS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("encodings", ENCODINGS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item("algos", ALGOS.accepted().collect::<Vec<_>>())?;
+    accepted.set_item(
+        "rest_policies",
+        REST_POLICIES.accepted().collect::<Vec<_>>(),
+    )?;
     d.set_item("accepted", accepted)?;
 
     let options = PyDict::new(py);
