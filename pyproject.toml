@@ -57,7 +57,7 @@ docs = [
 python-source = "src"
 module-name = "rustruct.core"
 manifest-path = "crates/rustruct-py/Cargo.toml"
-features = ["pyo3/abi3-py311", "rustruct-py/experimental-inspect"]
+features = ["pyo3/abi3-py311", "experimental-inspect"]
 include = ["COPYING"]
 
 [tool.uv]
