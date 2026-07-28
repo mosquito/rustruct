@@ -386,10 +386,15 @@ def ast_signature(posargs, kwonlyargs=(), kw_defaults=(), defaults=()):
 
 
 # Every generated node shares one position, because the code it stands for
-# has no source to point at. `compile()` insists on having them, and the
+# has no source to point at. `compile()` insists on having one, and the
 # alternative -- `ast.fix_missing_locations` -- walks the whole tree in
 # Python afterwards to fill them in, which costs more than compiling it.
-POSITION: dict[str, Any] = {"lineno": 1, "col_offset": 0, "end_lineno": 1, "end_col_offset": 0}
+#
+# Start only: `compile()` does not ask for `end_lineno`/`end_col_offset`,
+# and carrying them made every node a third more expensive to build. They
+# would only ever have underlined a caret in a traceback, and everything
+# here already claims to be at line 1.
+POSITION: dict[str, Any] = {"lineno": 1, "col_offset": 0}
 
 # One each, shared by every node in every tree. A context is a marker with
 # no fields and no position slot (`_fields` and `_attributes` are both
