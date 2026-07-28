@@ -111,44 +111,99 @@ static BINOPS: ClosedSet<BinOp> = ClosedSet {
 // ---------- where parsing is ----------
 
 /// How deep (for the cap) and where (for messages).
-#[derive(Clone)]
-pub struct Ctx {
+///
+/// The path is a chain of borrowed segments rather than a string grown as
+/// parsing descends. It is read in one place -- to say which field a
+/// failure came from -- so building it eagerly bought nothing and cost an
+/// allocation per field and per level, which on a nested schema was most
+/// of what compiling one cost.
+pub struct Ctx<'a> {
     depth: usize,
-    path: String,
+    parent: Option<&'a Ctx<'a>>,
+    seg: Seg<'a>,
 }
 
-impl Ctx {
-    pub fn root() -> Ctx {
+/// How one level spells itself in a path.
+enum Seg<'a> {
+    /// Adds nothing: the root, or a nested field list, which is already
+    /// under its own field's name.
+    Nothing,
+    /// A field: `.name`, or bare with nothing above it.
+    Field(&'a str),
+    /// Joined with no separator: `[]`, `?default`.
+    Suffix(&'a str),
+    /// A switch branch, spelled `?tag`.
+    Case(i64),
+}
+
+impl<'a> Ctx<'a> {
+    pub fn root() -> Ctx<'static> {
         Ctx {
             depth: 0,
-            path: String::new(),
+            parent: None,
+            seg: Seg::Nothing,
         }
     }
-    /// A nested type in an elem/case/default/then position, under its own
-    /// path segment if it has one.
-    fn child(&self, segment: &str) -> Ctx {
+
+    fn nest(&'a self, seg: Seg<'a>, deeper: bool) -> Ctx<'a> {
         Ctx {
-            depth: self.depth + 1,
-            path: format!("{}{segment}", self.path),
+            depth: self.depth + usize::from(deeper),
+            parent: Some(self),
+            seg,
         }
     }
-    /// A nested field list: deeper, but the path segment is the field's own.
-    fn deeper(&self) -> Ctx {
-        Ctx {
-            depth: self.depth + 1,
-            path: self.path.clone(),
-        }
+
+    /// A nested field list: deeper, but named by the field it belongs to.
+    fn deeper(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Nothing, true)
+    }
+    /// An array's element type.
+    fn elem(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Suffix("[]"), true)
+    }
+    /// A `when`'s `then`, which shares its field's name.
+    fn then(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Nothing, true)
+    }
+    /// A switch's fallback branch.
+    fn default_branch(&'a self) -> Ctx<'a> {
+        self.nest(Seg::Suffix("?default"), true)
+    }
+    /// One switch branch.
+    fn case(&'a self, tag: i64) -> Ctx<'a> {
+        self.nest(Seg::Case(tag), true)
     }
     /// One named (or deliberately unnamed) field inside this scope.
-    fn field(&self, leaf: &str) -> Ctx {
-        Ctx {
-            depth: self.depth,
-            path: if self.path.is_empty() {
-                leaf.to_string()
-            } else {
-                format!("{}.{leaf}", self.path)
-            },
+    fn field(&'a self, leaf: &'a str) -> Ctx<'a> {
+        self.nest(Seg::Field(leaf), false)
+    }
+
+    /// Where this is, as `frame.rows[].x` -- built only to put in a message.
+    fn path(&self) -> String {
+        let mut chain = Vec::new();
+        let mut here = Some(self);
+        while let Some(ctx) = here {
+            chain.push(&ctx.seg);
+            here = ctx.parent;
         }
+        let mut out = String::new();
+        for seg in chain.iter().rev() {
+            match seg {
+                Seg::Nothing => {}
+                Seg::Field(name) => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(name);
+                }
+                Seg::Suffix(text) => out.push_str(text),
+                Seg::Case(tag) => {
+                    out.push('?');
+                    out.push_str(&tag.to_string());
+                }
+            }
+        }
+        out
     }
 }
 
@@ -246,11 +301,14 @@ fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResul
     // reads that as "not given", and a misspelling would otherwise sail
     // through as long as it happened to carry None.
     for key in opts.keys() {
-        let k: String = key
-            .extract()
-            .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?;
-        if !allowed.contains(&k.as_str()) {
-            return Err(schema_err(match nearest(&k, allowed) {
+        // Borrowed: this runs for every option of every field, and the name
+        // is only read.
+        let k = key
+            .cast::<PyString>()
+            .map_err(|_| schema_err(format!("{kind}: opts keys must be str")))?
+            .to_str()?;
+        if !allowed.contains(&k) {
+            return Err(schema_err(match nearest(k, allowed) {
                 Some(hint) => format!("{kind}: unknown option '{k}' (did you mean '{hint}'?)"),
                 None => format!("{kind}: unknown option '{k}'"),
             }));
@@ -266,7 +324,7 @@ fn check_keys(opts: &Bound<'_, PyDict>, allowed: &[&str], kind: &str) -> PyResul
 
 macro_rules! simple {
     ($name:ident, $ty:ty, $what:literal) => {
-        fn $name(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<$ty> {
+        fn $name(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<$ty> {
             v.extract()
                 .map_err(|_| schema_err(format!("{kind}: {key} must be {}", $what)))
         }
@@ -280,13 +338,13 @@ simple!(p_i128, i128, "an int");
 simple!(p_bytes, Vec<u8>, "bytes");
 simple!(p_string, String, "a str");
 
-fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ByteOrder> {
+fn p_byteorder(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<ByteOrder> {
     BYTEORDERS
         .parse(&p_string(v, kind, key, _ctx)?)
         .map_err(schema_err)
 }
 
-fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<IntPrim> {
+fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<IntPrim> {
     INT_PRIMS
         .parse(&p_string(v, kind, key, _ctx)?)
         .map_err(schema_err)
@@ -294,7 +352,7 @@ fn p_prim(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<I
 
 /// Rejected here rather than at compile time, so the message names the
 /// field that wrote it.
-fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<u8> {
+fn p_width(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<u8> {
     let n: i64 = v
         .extract()
         .map_err(|_| schema_err(format!("{kind}: {key} must be an int in 1..64")))?;
@@ -371,16 +429,15 @@ fn expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, depth: usize) -> PyResult<E
     ))
 }
 
-fn p_expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx) -> PyResult<ExprIn> {
+fn p_expr(v: &Bound<'_, PyAny>, kind: &str, key: &str, _ctx: &Ctx<'_>) -> PyResult<ExprIn> {
     expr(v, kind, key, 0)
 }
 
-fn p_over(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, _ctx: &Ctx) -> PyResult<OverIn> {
+fn p_over(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, _ctx: &Ctx<'_>) -> PyResult<OverIn> {
     let shape = || schema_err("digest: over is either \"*\" or a tuple of names");
     // A str is iterable, so "*" has to be taken before the name list is.
     if let Ok(s) = v.cast::<PyString>() {
-        let s: String = s.extract()?;
-        return if s == "*" {
+        return if s.to_str()? == "*" {
             Ok(OverIn::Star)
         } else {
             Err(shape())
@@ -400,7 +457,7 @@ fn p_names(
     v: &Bound<'_, PyAny>,
     _kind: &str,
     _key: &str,
-    _ctx: &Ctx,
+    _ctx: &Ctx<'_>,
 ) -> PyResult<Vec<(String, u64)>> {
     let shape = || schema_err("flags: names must be a sequence of (str, int) pairs");
     let mut names = Vec::new();
@@ -410,27 +467,32 @@ fn p_names(
     Ok(names)
 }
 
-fn p_fields(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<Vec<FieldIn>> {
+fn p_fields(
+    v: &Bound<'_, PyAny>,
+    _kind: &str,
+    _key: &str,
+    ctx: &Ctx<'_>,
+) -> PyResult<Vec<FieldIn>> {
     parse_fields(v, &ctx.deeper())
 }
 
-fn p_elem(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child("[]"))
+fn p_elem(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.elem())
 }
 
-fn p_then(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child(""))
+fn p_then(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.then())
 }
 
-fn p_default(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx) -> PyResult<TypeIn> {
-    parse_type_spec(v, &ctx.child("?default"))
+fn p_default(v: &Bound<'_, PyAny>, _kind: &str, _key: &str, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
+    parse_type_spec(v, &ctx.default_branch())
 }
 
 fn p_cases(
     v: &Bound<'_, PyAny>,
     _kind: &str,
     _key: &str,
-    ctx: &Ctx,
+    ctx: &Ctx<'_>,
 ) -> PyResult<Vec<(i64, TypeIn)>> {
     let shape = || schema_err("switch: a cases element must be a (int, (kind, opts)) tuple");
     let mut cases = Vec::new();
@@ -446,10 +508,7 @@ fn p_cases(
             return Err(bad_tag());
         }
         let tag: i64 = tag_obj.extract().map_err(|_| bad_tag())?;
-        cases.push((
-            tag,
-            parse_type_spec(&pair.get_item(1)?, &ctx.child(&format!("?{tag}")))?,
-        ));
+        cases.push((tag, parse_type_spec(&pair.get_item(1)?, &ctx.case(tag))?));
     }
     Ok(cases)
 }
@@ -496,7 +555,7 @@ macro_rules! kinds {
     ($kind:ident: $(
         [$($k:literal),+ $(,)?] { $($opt:ident : $mode:tt $parse:expr),* $(,)? } => $build:expr
     );+ $(;)?) => {
-        fn parse_type($kind: &str, opts: &Bound<'_, PyDict>, ctx: &Ctx) -> PyResult<TypeIn> {
+        fn parse_type($kind: &str, opts: &Bound<'_, PyDict>, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
             if ctx.depth > MAX_SCHEMA_DEPTH {
                 return Err(schema_err(format!(
                     "schema nests deeper than {MAX_SCHEMA_DEPTH} levels"
@@ -641,11 +700,13 @@ kinds! {
 
 // ---------- the tuple forms around it ----------
 
-fn kind_str(obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    obj.extract().map_err(|_| {
+/// Borrowed from the caller's tuple: the name is matched, never kept.
+fn kind_str<'a>(obj: &'a Bound<'_, PyAny>) -> PyResult<&'a str> {
+    let bad = || {
         let shown = obj.repr().map(|r| r.to_string()).unwrap_or_default();
         schema_err(format!("unknown kind {shown}"))
-    })
+    };
+    obj.cast::<PyString>().map_err(|_| bad())?.to_str()
 }
 
 fn opts_dict<'py>(obj: &Bound<'py, PyAny>, kind: &str) -> PyResult<Bound<'py, PyDict>> {
@@ -655,19 +716,20 @@ fn opts_dict<'py>(obj: &Bound<'py, PyAny>, kind: &str) -> PyResult<Bound<'py, Py
 }
 
 /// `(kind, opts)` -- a type in the elem/case/default/then position.
-fn parse_type_spec(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<TypeIn> {
+fn parse_type_spec(obj: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<TypeIn> {
     let shape = || schema_err("a type spec must be a (kind, opts) tuple");
     let t = obj.cast::<PyTuple>().map_err(|_| shape())?;
     if t.len() != 2 {
         return Err(shape());
     }
-    let kind = kind_str(&t.get_item(0)?)?;
-    let opts = opts_dict(&t.get_item(1)?, &kind)?;
-    parse_type(&kind, &opts, ctx)
+    let kind_obj = t.get_item(0)?;
+    let kind = kind_str(&kind_obj)?;
+    let opts = opts_dict(&t.get_item(1)?, kind)?;
+    parse_type(kind, &opts, ctx)
 }
 
 /// `(name, kind, opts)` -- one field, located on failure.
-fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
+fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<FieldIn> {
     let shape = || schema_err("a field must be a (name, kind, opts) tuple");
     let t = item.cast::<PyTuple>().map_err(|_| shape())?;
     if t.len() != 3 {
@@ -685,11 +747,12 @@ fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
     };
     let here = ctx.field(name.as_deref().unwrap_or("<unnamed>"));
     let ty = (|| {
-        let kind = kind_str(&t.get_item(1)?)?;
-        let opts = opts_dict(&t.get_item(2)?, &kind)?;
-        parse_type(&kind, &opts, &here)
+        let kind_obj = t.get_item(1)?;
+        let kind = kind_str(&kind_obj)?;
+        let opts = opts_dict(&t.get_item(2)?, kind)?;
+        parse_type(kind, &opts, &here)
     })()
-    .map_err(|e| locate(item.py(), e, &here.path))?;
+    .map_err(|e| locate(item.py(), e, &here.path()))?;
     Ok(FieldIn { name, ty })
 }
 
@@ -697,7 +760,7 @@ fn parse_field(item: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<FieldIn> {
 /// extraction goes through the sequence protocol, which would quietly stop
 /// accepting the generators, `map()` results and `dict.values()` views that
 /// work today.
-pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx) -> PyResult<Vec<FieldIn>> {
+pub fn parse_fields(obj: &Bound<'_, PyAny>, ctx: &Ctx<'_>) -> PyResult<Vec<FieldIn>> {
     let mut out = Vec::new();
     for item in obj
         .try_iter()
