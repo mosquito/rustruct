@@ -4,6 +4,7 @@
 [![Latest Version](https://img.shields.io/pypi/v/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
 [![License](https://img.shields.io/pypi/l/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![Stars](https://img.shields.io/github/stars/mosquito/rustruct.svg)](https://github.com/mosquito/rustruct)
 
 A Rust core for parsing and building binary wire formats from Python.
 

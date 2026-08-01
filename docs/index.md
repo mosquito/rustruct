@@ -5,6 +5,7 @@
 [![Python Versions](https://img.shields.io/pypi/pyversions/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
 [![Tests](https://github.com/mosquito/rustruct/workflows/tests/badge.svg)](https://github.com/mosquito/rustruct/actions?query=workflow%3Atests)
 [![License](https://img.shields.io/pypi/l/rustruct.svg)](https://pypi.python.org/pypi/rustruct/)
+[![Stars](https://img.shields.io/github/stars/mosquito/rustruct.svg)](https://github.com/mosquito/rustruct)
 ```
 
 `rustruct` is a binary format compiler with a Rust execution core and a
