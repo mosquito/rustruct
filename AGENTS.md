@@ -268,6 +268,7 @@ Registries provide runtime dispatch:
 ```python
 from rustruct import Struct, U32
 
+
 class Payload(Struct, registry=True):
     pass
 

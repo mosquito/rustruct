@@ -107,9 +107,7 @@ def rdata_spec(rtype):
             return dnslib.CNAME("alias.example.test"), {"kind": "CNAME", "target": "alias.example.test"}
         case 6:
             return (
-                dnslib.SOA(
-                    "ns1.example.test", "hostmaster.example.test", (SOA_SERIAL, 3600, 600, 86400, 300)
-                ),
+                dnslib.SOA("ns1.example.test", "hostmaster.example.test", (SOA_SERIAL, 3600, 600, 86400, 300)),
                 {
                     "kind": "SOA",
                     "mname": "ns1.example.test",
@@ -183,9 +181,7 @@ def rdata_spec(rtype):
             )
         case 46:
             return (
-                dnslib.RRSIG(
-                    1, 5, 2, 4294967295, 4294967295, 0, 65535, "signer1.example.test", b"signature-bytes"
-                ),
+                dnslib.RRSIG(1, 5, 2, 4294967295, 4294967295, 0, 65535, "signer1.example.test", b"signature-bytes"),
                 {
                     "kind": "RRSIG",
                     "type_covered": 1,
@@ -358,9 +354,7 @@ def gen_scenarios():
         {
             "name": "scenario-maximum-domain-name",
             "coverage": {"family": "scenario", "scenario": "maximum-domain-name"},
-            "packet": empty_packet(
-                40962, flags_dict(rd=True), questions=[{"name": name, "qtype": 1, "qclass": 1}]
-            ),
+            "packet": empty_packet(40962, flags_dict(rd=True), questions=[{"name": name, "qtype": 1, "qclass": 1}]),
             "wire": record.pack().hex(),
         }
     )

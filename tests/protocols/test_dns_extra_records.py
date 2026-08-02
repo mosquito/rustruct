@@ -61,9 +61,7 @@ def test_rrsig_matches_dnslib_and_does_not_compress():
         signer="example.com",
         signature=b"abcdefg",
     )
-    assert pack(rdata) == bytes.fromhex(
-        "000105020000012c499602d24995e4003039076578616d706c6503636f6d0061626364656667"
-    )
+    assert pack(rdata) == bytes.fromhex("000105020000012c499602d24995e4003039076578616d706c6503636f6d0061626364656667")
 
 
 def test_nsec_matches_dnslib_and_does_not_compress():
@@ -101,9 +99,7 @@ def test_caa_matches_dnslib():
 
 def test_rp_matches_dnslib():
     rdata = RP(mbox="hostmaster.example.com", txt="contact.example.com")
-    assert pack(rdata) == bytes.fromhex(
-        "0a686f73746d6173746572076578616d706c6503636f6d0007636f6e74616374c00b"
-    )
+    assert pack(rdata) == bytes.fromhex("0a686f73746d6173746572076578616d706c6503636f6d0007636f6e74616374c00b")
 
 
 def test_dname_matches_dnslib():
